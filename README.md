@@ -25,14 +25,14 @@ In the example below, that data is stored as a class in the Locations class. The
 This source code example below can be found in the main function in DBSCANtest.cpp
 
 ```c++
-#include "dbscan.h"
+#include "MTDBSCAN.hpp"
 	:
 	:
  std::cout << "Adding data to DBSCAN..." << std::endl;
-  auto dbscan = new DBSCAN< dkey_t, dval_t, numDimensions>;
+  auto mtdbscan = new MTDBSCAN< dkey_t, dval_t, numDimensions>;
   // Add each pair points and values to the dbscan object
   for (size_t i = 0; i < numPoints; ++i) {
-    dbscan->addPointWithValue(coordinates[i], i);
+    mtdbscan->addPointWithValue(coordinates[i], i);
   }
   // get the search range to about cluster distance window
   std::vector<dkey_t> window(numDimensions);
@@ -41,22 +41,22 @@ This source code example below can be found in the main function in DBSCANtest.c
   }
 
   std::cout << "Running DBSCAN clustering algorithm..." << std::endl;
-  dbscan->setWindow(window);
+  mtdbscan->setWindow(window);
   timespec startTime = getTime();
-  dbscan->build();
+  mtdbscan->build();
   timespec endTime = getTime();
 
   double totalTime = (endTime.tv_sec - startTime.tv_sec) +
     1.0e-9 * ((double)(endTime.tv_nsec - startTime.tv_nsec));
   std::cout << "Total cluster time = " << std::fixed << std::setprecision(2) << totalTime << " seconds" << std::endl << std::endl;
 
-  if (!dbscan->checkClusters(numPoints)) {
+  if (!mtdbscan->checkClusters(numPoints)) {
     exit(1);
   }
 
   std::cout << "Checking to see that all values ended up in some cluster" << std::endl;
-  for (size_t i = 0; i < dbscan->getNumClusters(); i++) {
-    for (dval_t val : *dbscan->getClusterValueList(i)) {
+  for (size_t i = 0; i < mtdbscan->getNumClusters(); i++) {
+    for (dval_t val : *mtdbscan->getClusterValueList(i)) {
       indices[val] = true;
     }
   }
@@ -69,7 +69,7 @@ This source code example below can be found in the main function in DBSCANtest.c
     std::cout << "Failed to find all the values in the clusters." << std::endl;
   }
 
-  dbscan->sortClustersBySize();
+  mtdbscan->sortClustersBySize();
 ```
 
 Note that this interface is exactly the same as the single-threaded version in [DBSCAN-in-Cpp](https://github.com/johnarobinson77/DBSCAN-in-Cpp) and therefore is a drop-in replacement.
@@ -133,6 +133,8 @@ Note that this interface is exactly the same as the single-threaded version in [
   // checCluster does some basic check on the clusters and print some statistics
   bool checkClusters(const size_t numLocations, const std::string* tag = nullptr)  
 
+ // Sets the number of threads used for building the clusters.  The default is to use the hardware concurrancy value for the current processor.
+  void setNumThreads(int64_t thd = -1)
 ```
 
 ## The Multithreaded DBSCAN Algorithm
