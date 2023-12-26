@@ -191,7 +191,7 @@ Another optimization is to mark each child branch in a node in the k-d tree with
 
 The chart below shows how processing time diminishes with increasing thread. This data was taken on a 64-core Graviton processor on AWS. The performance flattens out above 32 threads, likely due to memory bandwidth and an increased number of overlapping sub-clusters.
 
-![](RackMultipart20231224-1-oyhwff_html_a1367d2ce0a9701.png)
+![Multithreaded DBSCAN Performance](https://github.com/johnarobinson77/Multithreaded-DBSCAN-Clustering-in-Cpp/blob/main/MTDBSCAN.PNG)
 
 ## References
 
