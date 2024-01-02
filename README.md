@@ -4,9 +4,9 @@ The code included here implements the popular DBSCAN clustering algorithm [1] in
 
 First, the k-d tree code presented here is highly optimized to build and search the tree using multithreading, significantly reducing the time needed for window searches.
 
-Second, it supports marking the nodes in the k-d three in such a way that whole branches of the tree can be marked as already taken. This eliminates redundant visiting a node while building the clusters.
+Second, it supports marking the nodes in the k-d tree in such a way that whole branches of the tree can be marked as already taken. This eliminates redundant visiting a node while building the clusters.
 
-Finally, it is used to facilitate multithreading the clustering algorithm itself. In the single-threaded version, the process of building the k-d tree is multithread, but the process of creating the clusters is single-threaded. In this multithreaded version, the clustering algorithm is also multithreaded and as described later, the kdTree is used to overcome the issues arising from multi-threading.
+Finally, it is used to facilitate multithreading the clustering algorithm itself. In the single-threaded version, the process of building the k-d tree is multithread, but the process of creating the clusters is single-threaded. In this multithreaded version, the clustering algorithm is also multithreaded and as described later, the k-d tree is used to overcome the issues arising from multi-threading.
 
 Note that because of the overhead required to implement multithreading, the multithreaded version using a single thread is not as fast as the single-threaded version. If multithreading is not required, use [DBSCAN-in-Cpp](https://github.com/johnarobinson77/DBSCAN-in-Cpp).
 
@@ -78,7 +78,7 @@ Note that this interface is exactly the same as the single-threaded version in [
 
 **MTDBSCAN.hpp** holds the MTDBSCAN class definition. The DBSCAN algorithm is performed in the build function there.
 
-**KdTreePDB.hpp** contains the KdTree class and the KdNode class. The KdTreePDB class is an API wrapper around the KdNode class. The KdNode class implements the building of the KdTree using the Knlogn algorithm. The algorithm description for building a KdTree and original code can be found at [https://github.com/chezruss/kd-tree](https://github.com/chezruss/kd-tree). Much of the code in the KdNode class for building the KdTree is taken directly from that code base. The search code in the KdNode class was rewritten to accelerate the particular problem of multithreaded DBSCAN,
+**KdTreePDB.hpp** contains the KdTree class and the KdNode class. The KdTreePDB class is an API wrapper around the KdNode class. The KdNode class implements the building of the k-d tree using the Knlogn algorithm. The algorithm description for building a k-d tree and original code can be found at [https://github.com/chezruss/kd-tree](https://github.com/chezruss/kd-tree). Much of the code in the KdNode class for building the k-d tree is taken directly from that code base. The search code in the KdNode class was rewritten to accelerate the particular problem of multithreaded DBSCAN,
 
 **ParallelSort.hpp, and ParallelFor.hpp** contain code for sorting in parallel. It is used in the kdTree build code.
 
@@ -181,15 +181,20 @@ To find and merge these subclusters, the following post-clustering process is pe
 
 ### Other Performance Considerations
 
-While overlapping subclusters are functionally resolved, they hinder performance and should be avoided as much as possible. A way to do that is for each thread to work on clusters that are geometrically as far apart as possible. The points in the most widely separated clusters will be on opposite sides of the KdTree.
+While overlapping subclusters are functionally resolved, they hinder performance and should be avoided as much as possible. A way to do that is for each thread to work on clusters that are geometrically as far apart as possible. The points in the most widely separated clusters will be on opposite sides of the k-d tree.
 
-The picker function that is used to provide a seed point for a new cluster has a selectionBias parameter that is used to select a path through the KdTree. The thread number is used to create a selectionBias that chooses a seed point that is as far away as possible from the other thread.
+The picker function that is used to provide a seed point for a new cluster has a selectionBias parameter that is used to select a path through the k-d tree. The thread number is used to create a selectionBias that chooses a seed point that is as far away as possible from the other thread.
 
 Another optimization is to mark each child branch in a node in the k-d tree with an index of a cluster that has used all of the points below. If a search for a cluster with the same index is performed, that branch can be skipped. However, if a search for a cluster with a different index is in progress, that branch still needs to be searched for only overlaps.
 
+### Performance Pothole
+There is one performace pothole with the current code that can cause extreme performance degradation.  This happens when the search distamce is large relative to the area containing the data set such that the results will end up with just a few cluster.  The requirement that a thread must search for a point in the cluster it's forming that have been taken by other clusters can result in cery large serch times in the k-d tree.  This performace degredation is only present when running multithreaded.  Running single threaded will resolve the issue.
+
+Doing dbscan clustering with such a large search region is, in general, not very usefull.  However, it may not be avoidable depending on how the algorithm is used.  There are several ways that this performance pothole could be mitigated which are being explored. 
+
 ## Results
 
-The chart below shows how processing time diminishes with increasing thread. This data was taken on a 64-core Graviton processor on AWS. The performance flattens out above 32 threads, likely due to memory bandwidth and an increased number of overlapping sub-clusters.
+The chart below shows how processing time diminishes with increasing thread.  This performance data was taken on a 64-core Graviton processor on AWS.  The performance flattens out above 32 thread, likely due to memory bandwidth and an increase number of overlapping sub clusters.  The data set is 1600 artificially created groups of 4000 3-dimentional points each.  The search region is chosen to identify those groups as clusters.  This is the default settings in DBSCANtest.cpp.
 
 ![Multithreaded DBSCAN Performance](https://github.com/johnarobinson77/Multithreaded-DBSCAN-Clustering-in-Cpp/blob/main/MTDBSCAN.PNG)
 
@@ -197,4 +202,4 @@ The chart below shows how processing time diminishes with increasing thread. Thi
 
 [1] Ester, Martin; Kriegel, Hans-Peter; Sander, Jörg; Xu, Xiaowei (1996). Simoudis, Evangelos; Han, Jiawei; Fayyad, Usama M. (eds.). A density-based algorithm for discovering clusters in large spatial databases with noise. Proceedings of the Second International Conference on Knowledge Discovery and Data Mining (KDD-96). AAAI Press. pp. 226–231. CiteSeerX 10.1.1.121.9220. ISBN 1-57735-004-9.
 
-[2] Russell A. Brown, Building a Balanced k-d Tree in O(kn log n) Time, Journal of Computer Graphics Techniques (JCGT), vol. 4, no. 1, 50-68, 2015.
+[2] Russell A. Brown, Building a Balanced k-d tree in O(kn log n) Time, Journal of Computer Graphics Techniques (JCGT), vol. 4, no. 1, 50-68, 2015.
