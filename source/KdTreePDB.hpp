@@ -51,18 +51,22 @@ public:
 };
 
 enum SearchRet { // the following are codes that the search routines will return fom a on the status of then node visited.
-  DeadNode,                // indicates the values, ltChile and gtChild pointer are all null.
-  NoResult,                 // indicates to result has been returned.
-  ResultFound,              // indicates a reulst has been found.
-  ResultFoundAndAllTaken,   // indicates reuls has been found and all nodes below that node have been taken
-  AllTaken                  // indicates a result has not been found but all nodes below have been taken
+  DeadNode,                 // indicates the values, ltChile and gtChild pointer are all null.
+  NoResult,                 // indicates no result has been returned.
+  ResultFound,              // indicates a results has been found.
+  ResultFoundAndTakenByID,  // indicates results has been found and all nodes below that node have been taken by current cluster
+  AllTakenByID,             // indicates a result has not been found but all nodes below have been taken by current cluster
+  ResultFoundAndTaken,      // indicates a result has been found and all nodes below have been taken by different clusters
+  AllTaken                  // indicates a result has not been found but all nodes below have been taken by different clusters
 };
 
+// this is the constant that is used to indicate all taken when the nices below do not match all IDs.
+const uint32_t allTakenID = 0xFFFFFFFF;
 
 template<typename K, typename V, typename M, size_t N>
 class KdNodePDB {
 
-  typedef std::pair<std::vector<K>, std::list<V>*> retPair_t;
+  typedef std::pair<K*, std::list<V>*> retPair_t;
 
 public:
   K tuple[N];
@@ -153,7 +157,7 @@ private:
         kdNodes[++end] = kdNodes[j];
       }
       else {
-        // append vales to the end of fte kpet kdNode and delete the now unused node
+        // append vales to the end of the kept kdNode and delete the now unused node
         kdNodes[end]->values->splice(kdNodes[end]->values->end(), *kdNodes[j]->values);
         delete kdNodes[j];
       }
@@ -251,17 +255,17 @@ private:
             dst[i] = reference[i];
           }
           // Sort the lower half of references[permut[0]] with the current thread.
-          size_t numthreads = 1;
+          size_t numThreads = 1;
           size_t pp1 = p + 1;
-          if ((maximumSubmitDepth - depth) > 0) numthreads = (1LL << (maximumSubmitDepth - depth));
+          if ((maximumSubmitDepth - depth) > 0) numThreads = (1LL << (maximumSubmitDepth - depth));
           parallelSort(dst + start, dst + median, [&](KdNodePDB<K, V, M, N>* a, KdNodePDB<K, V, M, N>* b) {
             return 0 > superKeyCompare(a->tuple, b->tuple, pp1);
-            }, numthreads);
+            }, numThreads);
 
           // Sort the upper half of references[permut[0]] with the current thread.
           parallelSort(dst + median + 1, dst + end + 1, [&](KdNodePDB<K, V, M, N>* a, KdNodePDB<K, V, M, N>* b) {
             return 0 > superKeyCompare(a->tuple, b->tuple, pp1);
-            }, numthreads);
+            }, numThreads);
         }
 
         // Partition the reference arrays specified by 'startIndex' in
@@ -323,24 +327,24 @@ private:
             for (size_t i = start; i <= median - 1L; ++i) {
               dst[i] = reference[i];
             }
-            size_t numthreads = 1;
+            size_t numThreads = 1;
             size_t pp1 = p + 1;
-            if (maximumSubmitDepth > -1) numthreads = (1LL << (maximumSubmitDepth - depth + 1));
+            if (maximumSubmitDepth > -1) numThreads = (1LL << (maximumSubmitDepth - depth + 1));
             parallelSort(dst + start, dst + median, [&](KdNodePDB<K, V, M, N>* a, KdNodePDB<K, V, M, N>* b) {
               return 0 > superKeyCompare(a->tuple, b->tuple, pp1);
-              }, numthreads / 2);
+              }, numThreads / 2);
           });
 
           // Copy and sort the upper half of references[permut[0]] with the current thread.
           for (size_t i = median + 1; i <= end; ++i) {
             dst[i] = reference[i];
           }
-          int64_t numthreads = 1;
+          int64_t numThreads = 1;
           size_t pp1 = p + 1;
-          if (maximumSubmitDepth > -1) numthreads = (1LL << (maximumSubmitDepth - depth + 1));
+          if (maximumSubmitDepth > -1) numThreads = (1LL << (maximumSubmitDepth - depth + 1));
           parallelSort(dst + median + 1, dst + end + 1, [&](KdNodePDB<K, V, M, N>* a, KdNodePDB<K, V, M, N>* b) {
             return 0 > superKeyCompare(a->tuple, b->tuple, pp1);
-            }, numthreads / 2);
+            }, numThreads / 2);
 
           // Wait for the child thread to finish execution.
           try {
@@ -699,223 +703,22 @@ private:
      *
      * Calling parameters:
      *
+     * result - list of key value pairs found during the search
      * queryLower - the query lower bound vector
      * queryUpper - the query upper bound vector
+     * moveTo - pointer to the cluster into which the found items will be placed
      * permutation - vector that specifies permutation of the partition coordinate
      * maximumSubmitDepth - the maximum tree depth at which a child task may be launched
      * depth - the depth in the k-d tree
-     * enable - a vector that specifies the dimensions on which to prune the region search
      *
-     * return a list that contains the KdNodes that lie within the cutoff distance of the query node
+     * return - a SearchReturn enum indicating whether all the nodes in the tree below have already been taken by this cluster.
      */
-#ifdef OLD_SEARCH
-public:
-  void regionSearch(std::list<retPair_t>& result,
-    const std::vector<K>& queryLower, const std::vector<K>& queryUpper,
-    const signed_size_t maximumSubmitDepth, const size_t depth, std::vector<int64_t>& permutation) {
-
-    // Look up the primary coordinate index.
-    unsigned int p = (unsigned int)permutation.at(depth);
-
-    // the branchCode will be used later to select the actual branch configuration in the switch statement
-    // below.  0 = no branch, 1 = < branch only, 2 = > branch only, 3 = both branches.
-    int branchCode = 0;
-
-    // Search the < branch of the k-d tree if the partition coordinate of the queryPlus is
-    // <= the partition coordinate of the k-d node.  The < branch
-    // must be searched when the cutoff distance equals the partition coordinate because the super
-    // key may assign a point to either branch of the tree if the sorting or partition coordinate,
-    // which forms the most significant portion of the super key, shows equality.
-    if (queryLower[p] <= tuple[p]) {
-      // but only search if the ltChild pointer is not null;
-      if (ltChild != nullptr) branchCode = 1;
-      // Search the > branch of the k-d tree if the partition coordinate of the queryPlus is
-      // >= the partition coordinate of the k-d node.  The < branch
-      // must be searched when the cutoff distance equals the partition coordinate because the super
-      // key may assign a point to either branch of the tree if the sorting or partition coordinate,
-      // which forms the most significant portion of the super key, shows equality.
-      if (queryUpper[p] >= tuple[p]) {
-        // but only if the gtChild pointer is not null;
-        if (gtChild != nullptr) branchCode += 2;
-        // while here check to see if the local tuple is inside the the hypercube.
-        if (values != nullptr) {
-          // If the distance from the query node to the k-d node is within the cutoff distance
-          // in all k dimensions, add the k-d node to a list.
-          bool inside = true;
-          for (size_t i = 0; i < queryUpper.size(); i++) {
-            if ((queryUpper[i] < tuple[i]) || (queryLower[i] >  tuple[i])) {
-              inside = false;
-              break;
-            }
-          }
-          if (inside) {
-            std::vector<K> tempTuple(tuple, tuple + queryLower.size());
-            retPair_t tmpPair(tempTuple, *values);
-            result.push_back(tmpPair);
-          }
-        }
-      }
-    }
-    else { // will not decend the lt branch so lets check the gt.
-      if (gtChild != nullptr && queryUpper[p] >= tuple[p]) branchCode = 2;
-    }
-
-    // now implenent the branching decided on earlier
-    switch (branchCode) {
-    case 0: // child pointer are both null so just return
-      break;
-    case 1: // only go down the less than branch
-      ltChild->regionSearch(result, queryLower, queryUpper, maximumSubmitDepth, depth + 1, permutation);
-      break;
-    case 2: // only go down the greater than branch
-      gtChild->regionSearch(result, queryLower, queryUpper, maximumSubmitDepth, depth + 1, permutation);
-      break;
-    case 3: // go down both branches
-      if (depth <= maximumSubmitDepth) {
-        // get a future and another list ready for a child thread
-        std::future< void > searchFuture;
-        std::list<retPair_t> ltResult;
-        // Search the < branch asynchronously with a child thread.
-        searchFuture = std::async(std::launch::async, [&] {
-          return ltChild->regionSearch(ltResult, queryLower, queryUpper,
-          maximumSubmitDepth, depth + 1, permutation); });
-        // Search the > branch  with the master thread.
-        gtChild->regionSearch(result, queryLower, queryUpper, maximumSubmitDepth, depth + 1, permutation);
-
-        // Get the result of searching the < branch with the child thread.
-        try {
-          searchFuture.get();
-        }
-        catch (std::exception const& e) {
-          std::cout << "caught exception " << e.what() << std::endl;
-        }
-        result.splice(result.end(), ltResult);
-      }
-      else { // if below the maximum submit depth
-        ltChild->regionSearch(result, queryLower, queryUpper, maximumSubmitDepth, depth + 1, permutation);
-        gtChild->regionSearch(result, queryLower, queryUpper, maximumSubmitDepth, depth + 1, permutation);
-      }
-      break;
-    }
-    return;
-  }
-
-public:
-  int64_t regionSearchAndRemove(std::list<retPair_t>& result,
-    const std::vector<K>& queryLower, const std::vector<K>& queryUpper,
-    const signed_size_t maximumSubmitDepth, const signed_size_t depth, std::vector<int64_t>& permutation) {
-
-    // Look up the primary coordinate index.
-    unsigned int p = (unsigned int)permutation[(unsigned int)depth];
-
-    // the branchCode will be used later to select the actual branch configuration in the switch statement
-    // below.  0 = no branch, 1 = < branch only, 2 = > branch only, 3 = both branches.
-    int branchCode = 0;
-    // the return codes indicate whether the status of the node that was just returned from
-    // 0 = active node
-    // 1 = the node and all nodes below are dead and it's can be removed from the tree.
-    int64_t ltRetCode = 0;
-    int64_t gtRetCode = 0;
-
-    // Search the < branch of the k-d tree if the partition coordinate of the queryPlus is
-    // <= the partition coordinate of the k-d node.  The < branch
-    // must be searched when the cutoff distance equals the partition coordinate because the super
-    // key may assign a point to either branch of the tree if the sorting or partition coordinate,
-    // which forms the most significant portion of the super key, shows equality.
-    if (queryLower[p] <= tuple[p]) {
-      // but only search if the ltChild pointer is not null;
-      if (ltChild != nullptr) branchCode = 1;
-      // Search the > branch of the k-d tree if the partition coordinate of the queryPlus is
-      // >= the partition coordinate of the k-d node.  The < branch
-      // must be searched when the cutoff distance equals the partition coordinate because the super
-      // key may assign a point to either branch of the tree if the sorting or partition coordinate,
-      // which forms the most significant portion of the super key, shows equality.
-      if (queryUpper[p] >= tuple[p]) {
-        // but only if the gtChild pointer is not null;
-        if (gtChild != nullptr) branchCode += 2;
-        // while here check to see if the local tuple is inside the the hypercube.
-        if (values != nullptr) {
-          // If the distance from the query node to the k-d node is within the query rect
-          // in all k dimensions, add the k-d node to a list.
-          bool inside = true;
-          for (size_t i = 0; i < queryUpper.size(); i++) {
-            if ((queryUpper[i] < tuple[i]) || (queryLower[i] > tuple[i])) {
-              inside = false;
-              break;
-            }
-          }
-          if (inside) {
-            std::vector<K> tempTuple(tuple, tuple + queryLower.size());
-            retPair_t tmpPair(tempTuple, *values);
-            result.push_back(tmpPair);
-            delete values;
-            values = nullptr;   // mark the node dead by nulling the pointer
-          }
-        }
-      }
-    }
-    else { // will not decend the lt branch so lets check the gt.
-      if (gtChild != nullptr && queryUpper[p] >= tuple[p]) branchCode = 2;
-    }
-
-    // now implenent the branching decided on earlier
-    switch (branchCode) {
-    case 0: // child pointer are both null so just return
-      break;
-    case 1: // only go down the less than branch
-      ltRetCode = ltChild->regionSearchAndRemove(result, queryLower, queryUpper, maximumSubmitDepth, depth + 1, permutation);
-      break;
-    case 2: // only go down the greater than branch
-      gtRetCode = gtChild->regionSearchAndRemove(result, queryLower, queryUpper, maximumSubmitDepth, depth + 1, permutation);
-      break;
-    case 3: // go down both branches
-      if (depth <= maximumSubmitDepth) {
-        // get a future and another list ready for a child thread
-        std::future< int64_t > searchFuture;
-        std::list<retPair_t> ltResult;
-        // Search the < branch asynchronously with a child thread.
-        searchFuture = std::async(std::launch::async, [&] {
-          return ltChild->regionSearchAndRemove(ltResult, queryLower, queryUpper,
-          maximumSubmitDepth, depth + 1, permutation); });
-        // Search the > branch  with the master thread.
-        gtRetCode = gtChild->regionSearchAndRemove(result, queryLower, queryUpper, maximumSubmitDepth, depth + 1, permutation);
-
-        // Get the result of searching the < branch with the child thread.
-        try {
-          ltRetCode = searchFuture.get();
-        }
-        catch (std::exception const& e) {
-          std::cout << "caught exception " << e.what() << std::endl;
-        }
-        result.splice(result.end(), ltResult);
-      }
-      else { // if below the maximum submit depth
-        ltRetCode = ltChild->regionSearchAndRemove(result, queryLower, queryUpper, maximumSubmitDepth, depth + 1, permutation);
-        gtRetCode = gtChild->regionSearchAndRemove(result, queryLower, queryUpper, maximumSubmitDepth, depth + 1, permutation);
-      }
-      break;
-    }
-    if (ltRetCode == 1) {
-      delete ltChild;
-      ltChild = nullptr;
-    }
-    if (gtRetCode == 1) {
-      delete gtChild;
-      gtChild = nullptr;
-    }
-    // retun a dead node code if all the pointers in this node are null;
-    if (values == nullptr && ltChild == nullptr && gtChild == nullptr) {
-      return 1;
-    }
-    return 0;
-  }
-#endif
 public:
   SearchRet regionSearchAndRemove(std::list<retPair_t*>& result,
     const std::vector<K>& queryLower, const std::vector<K>& queryUpper,
     M* const moveTo, const signed_size_t depth, const std::vector<int64_t>& permutation) {
     
-    // get a local copy of fthe cluster ID;
+    // get a local copy of the cluster ID;
     const uint32_t& moveToID = moveTo->getID();
 
     // Look up the primary coordinate index.
@@ -925,10 +728,10 @@ public:
     // below.  0 = no branch, 1 = < branch only, 2 = > branch only, 3 = both branches.
     int branchCode = 0;
     // the return codes indicate whether the status of the node that was just returned from
-    // init the return result to NoResut
+    // init the return result to NoResult
     SearchRet ltRetCode = NoResult;
     SearchRet gtRetCode = NoResult;
-    SearchRet returnResult = AllTaken;
+    SearchRet returnResult = AllTakenByID;
 
     // Search the < branch of the k-d tree if the partition coordinate of the queryPlus is
     // <= the partition coordinate of the k-d node.  The < branch
@@ -947,7 +750,7 @@ public:
         // but only search if the gtChild pointer is not null and all nodes below are not taken for this container
         if (gtChild != nullptr && (gtAllTaken != moveToID)) branchCode += 2;
         // while here check to see if the local tuple is inside the the hypercube.
-        // If the distance from the query node to the k-d node is within the query rect
+        // If the distance from the query node to the k-d node is within the query rectangle
         // in all k dimensions, add the k-d node to a list.
         bool inside = true;
         for (size_t i = 0; i < queryUpper.size(); i++) {
@@ -962,10 +765,11 @@ public:
           // check if the node had not already been taken 
           if (values != nullptr) {
             // if it has not, add this nodes data to the return list and mark the node as taken
-            retPair_t* tmpPair = new retPair_t(std::vector<K>(tuple, tuple + N), values);
+            retPair_t* tmpPair = new retPair_t(tuple, values);
             result.push_back(tmpPair);
             movedTo = moveTo;  // mark the value as taken by another container.
             values = nullptr;   // mark the node dead by nulling the pointer
+            returnResult = ResultFoundAndTaken;
           } else if (moveTo != movedTo) {
             // else indicate this cluster overlaps another cluster
             if (moveTo->overlaps == nullptr) {
@@ -980,214 +784,193 @@ public:
               std::cout << "cluster " << moveToID << " overlaps with cluster " << movedTo->getID() << "\n";
             }
 #endif
+            returnResult = NoResult;
+            // since an overlap was identified, there is no reason to continue searching the child branches if
+            // the overlapped cluster ID = the AllTaken IDs.
+            if (movedTo->getID() == ltAllTaken) branchCode &= 0x2;
+            if (movedTo->getID() == gtAllTaken) branchCode &= 0x1;
           }
         }
-        returnResult = ResultFoundAndAllTaken;
         
       }
     }
-    else { // will not decend the lt branch so lets check the gt.
+    else { // will not descend the lt branch so lets check the gt.
       if (queryUpper[p] >= tuple[p]) {
         // but only search if the gtChild pointer is not null and all nodes below are not taken for this container
         if (gtChild != nullptr && (gtAllTaken != moveToID)) branchCode = 2;
       }
     }
 
-    // now implenent the branching decided on earlier
+    // now implement the branching decided on earlier
     switch (branchCode) {
     case 0: // child pointer are both null so just return
       break;
     case 1: // only go down the less than branch
       ltRetCode = ltChild->regionSearchAndRemove(result, queryLower, queryUpper, moveTo, depth + 1, permutation);
-      if (ltRetCode == AllTaken || ltRetCode == ResultFoundAndAllTaken) {
+      if (ltRetCode == AllTakenByID || ltRetCode == ResultFoundAndTakenByID) {
         ltAllTaken = moveToID;
+      }
+      else if (ltRetCode == AllTaken || ltRetCode == ResultFoundAndTaken) {
+        ltAllTaken = allTakenID;
       }
       break;
     case 2: // only go down the greater than branch
       gtRetCode = gtChild->regionSearchAndRemove(result, queryLower, queryUpper, moveTo, depth + 1, permutation);
-      if (gtRetCode == AllTaken || gtRetCode == ResultFoundAndAllTaken) {
+      if (gtRetCode == AllTakenByID || gtRetCode == ResultFoundAndTakenByID) {
         gtAllTaken = moveToID;
+      }
+      else if (gtRetCode == AllTaken || gtRetCode == ResultFoundAndTaken) {
+        gtAllTaken = allTakenID;
       }
       break;
     case 3: // go down both branches
       ltRetCode = ltChild->regionSearchAndRemove(result, queryLower, queryUpper, moveTo, depth + 1, permutation);
-      if (ltRetCode == AllTaken || ltRetCode == ResultFoundAndAllTaken) {
+      if (ltRetCode == AllTakenByID || ltRetCode == ResultFoundAndTakenByID) {
         ltAllTaken = moveToID;
       }
+      else if (ltRetCode == AllTaken || ltRetCode == ResultFoundAndTaken) {
+        ltAllTaken = allTakenID;
+      }
       gtRetCode = gtChild->regionSearchAndRemove(result, queryLower, queryUpper, moveTo, depth + 1, permutation);
-      if (gtRetCode == AllTaken || gtRetCode == ResultFoundAndAllTaken) {
+      if (gtRetCode == AllTakenByID || gtRetCode == ResultFoundAndTakenByID) {
         gtAllTaken = moveToID;
+      }
+      else if (gtRetCode == AllTaken || gtRetCode == ResultFoundAndTaken) {
+        gtAllTaken = allTakenID;
       }
       break;
     }
 
-    // Now figure out what to return.  If something was found either here or below return 1 or
-    // if this node is still active as indicated by non null pointer set returnResult to 1.
-    //Otherwise return a 0.
-    if (returnResult == ResultFoundAndAllTaken && (movedTo != moveTo || !(ltAllTaken == moveToID || ltChild == nullptr) || !(gtAllTaken == moveToID || gtChild == nullptr))) {
-      returnResult = ResultFound;
+    // Now figure out what to return.
+    // If the returnResult indicates 
+    if (returnResult == ResultFoundAndTaken || returnResult == ResultFoundAndTakenByID) {
+      if (movedTo == moveTo && (ltAllTaken == moveToID || ltChild == nullptr) && (gtAllTaken == moveToID || gtChild == nullptr))
+        returnResult = ResultFoundAndTakenByID;
+      else if (movedTo != nullptr && (ltAllTaken != 0 || ltChild == nullptr) && (gtAllTaken != 0 || gtChild == nullptr))
+        returnResult = ResultFoundAndTaken;
+      else returnResult = ResultFound;
     }
-    else if (returnResult == AllTaken && (movedTo != moveTo || !(ltAllTaken == moveToID || ltChild == nullptr) || !(gtAllTaken == moveToID || gtChild == nullptr))) {
-      returnResult = NoResult;
-    }
-    return returnResult;
-  }
-
-
-  //TODO  Add search functons with the enable vector
-
-  /**
-  The pickValue picks a value from the kdTree by decending the tree until it finds
-  a knNode where both child pointers are null and returns that value
-  Paramaeters:
-    returnKV:   refernece to a retPair where to place the value.
-    selector:   unsigned in where the bits are used to guide which clikd node to decend
-    removePick: bool where if true will cause the node found to be removed
-    depth:      integer counting the number of levels decended.
-
-    return:     integer indicating the state of the node
-
-  **/
-#ifdef OLD_SEARCH
-public:
-  SearchRet pickValue(retPair_t& returnKV,
-    const uint64_t selector, bool removePick, const int depth) {
-
-    // init the return result to NoResut
-    SearchRet returnResult = NoResult;
-
-    bool goGtThan = (selector & 0x1) == 1;
-
-    // if greater than or less than, continue the search on  the appropriate child node
-    if ((!goGtThan || gtChild == nullptr) && ltChild != nullptr) {
-      returnResult = ltChild->pickValue(returnKV, selector >> 1, removePick, depth + 1);
-      // if the node below declared itself dead, remove the link
-      if (removePick && returnResult == DeadNode) {
-        delete ltChild;
-        ltChild = nullptr;
-      }
-    }
-    else if ((goGtThan || ltChild == nullptr) && gtChild != nullptr) {
-      returnResult = gtChild->pickValue(returnKV, selector >> 1, removePick, depth + 1);
-      // if the node below declared itself dead, remove the link
-      if (removePick && returnResult == DeadNode) {
-        delete gtChild;
-        gtChild = nullptr;
-      }
-    }
-    else {// both child pointers must be null to get here so this is a leaf node
-      if (values != nullptr) {
-        std::vector<K> key(N);
-        for (size_t i = 0; i < N; i++) {
-          key[i] = tuple[i];
-        }
-        returnKV = retPair_t(key, *values);
-        if (removePick) {
-          delete values;
-          values = nullptr;
-          returnResult = DeadNode;  //flag for possible node removal
-        }
-        else {
-          returnResult = ResultFound;
-        }
-      }
-    }
-    // Now figure out what to return.  If something was found either here or below return 1 or
-    // if this node is still active as indicated by non null pointer set returnResult to 1.
-    //Otherwise return a 0.
-    if (returnResult == DeadNode && (values != nullptr || ltChild != nullptr || gtChild != nullptr)) {
-      returnResult = ResultFound;
+    else if (returnResult == AllTaken || returnResult == AllTakenByID) {
+      if (movedTo == moveTo && (ltAllTaken == moveToID || ltChild == nullptr) && (gtAllTaken == moveToID || gtChild == nullptr))
+        returnResult = AllTakenByID;
+      else if (movedTo != nullptr && (ltAllTaken != 0 || ltChild == nullptr) && (gtAllTaken != 0 || gtChild == nullptr))
+        returnResult = AllTaken;
+      else returnResult = NoResult;
     }
     return returnResult;
   }
 
-
   /**
-  The pickValue picks a value from the kdTree by decending the tree until it finds
+  The pickValue picks a value from the kdTree by descending the tree until it finds
   a knNode where both child pointers are null and returns that value
-  Paramaeters:
-    returnKV:   refernece to a retPair where to place the value.
-    selector:   unsigned in where the bits are used to guide which clikd node to decend
+  Parameters:
+    returnKV:   reference to a retPair where to place the value.
+    selector:   unsigned in where the bits are used to guide which child node to descend
     removePick: bool where if true will cause the value to be removed
-    moveTo:     mointer to some object that will hold the value found
-    depth:      integer counting the number of levels decended.
+    moveTo:     pointer to some object that will hold the value found
+    depth:      integer counting the number of levels descended.
 
-    return:     SearchRet indicating the state of the node
+    return:     SearchRet enum indicating whether this node and all of the nodes below have been taken
 
   **/
-#endif
+
 public:
   SearchRet pickValue(retPair_t& returnKV,
     const uint64_t selector, M* const moveTo, const bool removePick, const int depth) {
 
     const uint32_t& moveToID = moveTo->getID();
-      
-    // init the return result to 0
+
+    // init the return result to AllTaken
     SearchRet returnResult = AllTaken;
 
+    // set the preferred recursion direction for this level fro the selector
     bool goGtThan = (selector & 0x1) == 1;
 
-    // if greater than or less than, continue the search on  the appropriate child node
-    if ((!goGtThan || gtAllTaken != 0 || gtChild == nullptr ) && (ltAllTaken == 0 && ltChild != nullptr)) {
+    // If preferred is lt or the preferred is gt but that path is blocked, 
+    // continue the search on the appropriate the lt child
+    if ((!goGtThan || gtAllTaken != 0 || gtChild == nullptr) && (ltAllTaken == 0 && ltChild != nullptr)) {
       returnResult = ltChild->pickValue(returnKV, selector >> 1, moveTo, removePick, depth + 1);
       // if the node below declared itself allTaken, set the gtAllTaken flag
-      if (removePick && (returnResult == AllTaken || returnResult == ResultFoundAndAllTaken)) {  // i
+      if (removePick && (returnResult == ResultFoundAndTakenByID)) {
         ltAllTaken = moveToID;
       }
-      if ((returnResult == AllTaken || returnResult == NoResult) && gtChild != nullptr) {
+      else if (removePick && (returnResult == ResultFoundAndTaken)) {
+        ltAllTaken = allTakenID;
+      }
+      // else if no result was found, try the gt path
+      else if ((returnResult == AllTakenByID || returnResult == AllTaken || returnResult == NoResult) &&
+               (gtAllTaken == 0 && gtChild != nullptr)) {
         returnResult = gtChild->pickValue(returnKV, selector >> 1, moveTo, removePick, depth + 1);
         // if the node below declared itself allTaken, set the gtAllTaken flag
-        if (removePick && (returnResult == AllTaken || returnResult == ResultFoundAndAllTaken)) {  // i
+        if (removePick && (returnResult == ResultFoundAndTakenByID)) {
           gtAllTaken = moveToID;
+        }
+        else if (removePick && (returnResult == ResultFoundAndTaken)) {
+          gtAllTaken = allTakenID;
         }
       }
     }
+    // If preferred is gt or the preferred is lt but that path is blocked, 
+    // continue the search on the appropriate the gt child
     else if ((goGtThan || ltAllTaken != 0 || ltChild == nullptr) && (gtAllTaken == 0 && gtChild != nullptr)) {
       returnResult = gtChild->pickValue(returnKV, selector >> 1, moveTo, removePick, depth + 1);
       // if the node below declared itself allTaken, set the gtAllTaken flag
-      if (removePick && (returnResult == AllTaken || returnResult == ResultFoundAndAllTaken)) {  // i
+      if (removePick && (returnResult == ResultFoundAndTakenByID)) {
         gtAllTaken = moveToID;
       }
-      if ((returnResult == AllTaken || returnResult == NoResult) && ltChild != nullptr) {
+      else if (removePick && (returnResult == ResultFoundAndTaken)) {
+        gtAllTaken = allTakenID;
+      }
+      //if no result was found on the gt child, try the lt child
+      else if ((returnResult == AllTakenByID || returnResult == AllTaken || returnResult == NoResult) && 
+               (ltAllTaken == 0 && ltChild != nullptr)) {
         returnResult = ltChild->pickValue(returnKV, selector >> 1, moveTo, removePick, depth + 1);
         // if the node below declared itself allTaken, set the gtAllTaken flag
-        if (removePick && (returnResult == AllTaken || returnResult == ResultFoundAndAllTaken)) {  // i
+        if (removePick && (returnResult == ResultFoundAndTakenByID)) {
           ltAllTaken = moveToID;
+        }
+        else if (removePick && (returnResult == ResultFoundAndTaken)) {
+          ltAllTaken = allTakenID;
         }
       }
     }
-    if (returnResult == NoResult || returnResult == AllTaken) {
+
+    if (returnResult == NoResult || returnResult == AllTaken || returnResult == AllTakenByID) {
       if (values != nullptr) {
         // grab a lock
         std::lock_guard<std::mutex> guard(thisMutex);
         // check again to make sure this node was not taken
         if (values != nullptr) {
-          returnKV = retPair_t(std::vector<K>(tuple, tuple + N), values);
+          returnKV = retPair_t(tuple, values);
           movedTo = moveTo;  // mark the node as taken by the searching container.
           if (removePick) {
             values = nullptr;
-            returnResult = ResultFoundAndAllTaken;  //flag for possible node all taken
-          } else {
+            returnResult = ResultFoundAndTaken;  //flag for possible node all taken
+          }
+          else {
             returnResult = ResultFound;
           }
-        }  else {
-          returnResult = AllTaken;  // possibly all taken, check later
         }
-      } else {
-        returnResult = AllTaken;  // possibly all taken, check later
       }
     }
-    // Now figure out what to return.  
-    // If the returnResult indcates ResultFoundAllTaken from a lower call but this not is not all taken, change returnResult to only ResultFfund
-     if (returnResult == ResultFoundAndAllTaken && (movedTo != moveTo || !(ltAllTaken == moveToID || ltChild == nullptr) || !(gtAllTaken == moveToID || gtChild == nullptr))) {
-      returnResult = ResultFound;
-    } else if (returnResult == AllTaken && (movedTo != moveTo || !(ltAllTaken == moveToID || ltChild == nullptr) || !(gtAllTaken == moveToID || gtChild == nullptr))) {
-      returnResult = NoResult;
+    // Now figure out what to return.
+    // If the returnResult indicates ResultFoundAllTaken from a lower call but this node is not all taken, change returnResult to ResultFound
+    if (returnResult == ResultFoundAndTaken || returnResult == ResultFoundAndTakenByID) {
+      if (movedTo == moveTo && (ltAllTaken == moveToID || ltChild == nullptr) && (gtAllTaken == moveToID || gtChild == nullptr))
+        returnResult = ResultFoundAndTakenByID;
+      else if (movedTo != nullptr && (ltAllTaken != 0 || ltChild == nullptr) && (gtAllTaken != 0 || gtChild == nullptr))
+        returnResult = ResultFoundAndTaken;
+      else returnResult = ResultFound;
     }
-    return returnResult;
+    else if (returnResult == AllTaken || returnResult == AllTakenByID) {
+      if (movedTo == moveTo && (ltAllTaken == moveToID || ltChild == nullptr) && (gtAllTaken == moveToID || gtChild == nullptr))
+        returnResult = AllTakenByID;
+      else if (movedTo != nullptr && (ltAllTaken != 0 || ltChild == nullptr) && (gtAllTaken != 0 || gtChild == nullptr))
+        returnResult = AllTaken;
+      else returnResult = NoResult;
+    }
+     return returnResult;
   }
-
-
 
  }; // class KdNodePDB
 
@@ -1197,17 +980,17 @@ public:
   template<typename K, typename V, typename M, size_t N>
 class KdTreePDB {
 
-  typedef std::pair<std::vector<K>, std::list<V>*> retPair_t;
+  typedef std::pair<K*, std::list<V>*> retPair_t;
 
 private:
   size_t numPoints = 0;  // total number of points submitted to the KdTree.
-  std::vector<KdNodePDB<K, V, M, N>*> kdNodes;  // vector of kdNodes reslting from submissions to the KdTree.
+  std::vector<KdNodePDB<K, V, M, N>*> kdNodes;  // vector of kdNodes resulting from submissions to the KdTree.
   KdNodePDB<K, V, M, N>* root = nullptr;  // root of the KdTree after it's built
-  std::vector<int64_t> permutation; // vector of precalculated levels
+  std::vector<int64_t> permutation; // vector of pre-calculated levels
   signed_size_t numThreads = 1;     // number of threads used in the process
   signed_size_t maximumSubmitDepth = -1; // maximum depth in tree building or searching where new threads are submitted.
 
-  // calculats the maximumSubmitDepth given the number of threads.
+  // calculates the maximumSubmitDepth given the number of threads.
   signed_size_t calcMaximumSubmitDepth() {
     signed_size_t n = 0;
     if (numThreads > 0) {
@@ -1400,7 +1183,7 @@ public:
     // search the tree to find the node to return and possibly delete.
     SearchRet returnResult = root->pickValue(returnKV, selectionBias, moveTo, remove, 0);
     // Check to see if no data was returned.  If so then return false.
-    if (returnResult == NoResult || returnResult == AllTaken) return false;
+    if (returnResult == NoResult || returnResult == AllTakenByID || returnResult == AllTaken) return false;
 
     return true;
   }

@@ -9,7 +9,7 @@
 
 //#define DEBUG_PRINT  // enable this to add debug print messages.  must be defined befor including MTDBSCAN.hpp
 //#define COMPARISON_TEST // enables a full comparison of clusters between the multithreaded DBSCAN and single threaded DBSCAN
-#define MEASURE_KDTREE_TIME
+//#define MEASURE_KDTREE_TIME
 
 #include "MTDBSCAN.hpp"
 #ifdef COMPARISON_TEST
@@ -37,32 +37,33 @@ double timeNow() {
 // This test has been run with in64_t, float, and double for the dkey_t type and dimensions 1 to 5.
 // Note: the randomInterval class used in this fuction is defined in KdTree.h
 
+//#define EXTREME_CASE1
+
 int main(int argc, const char* argv[])
 {
-  std::cout << "Creating artificially clustered data...." << std::endl;
   const int numDimensions = 3;            // dimensions of the point
   int64_t clusterSpan = 1000;             // +/- range of the random numbers used to generate a cluster
   int64_t numClusters = 1600;             // number of clusters to generate
   int64_t clusterSpacing = 10000000000L;  // +/- range of random numbers used to generate the cluster center points
   int64_t numPointsPer = 4000;            // number of points per cluster
-  dkey_t searchRad = (dkey_t)(clusterSpan * sqrt(numDimensions) / sqrt(3));  // size of the cluster search window.  
+  dkey_t searchRad = (dkey_t)(clusterSpan * sqrt(numDimensions) / sqrt(3));  // size of the cluster search window.
   int numThreads = -1;                    // number of threads.  -1 indicates use the processor number of cores
   int rngSeed = 100;                      // random number generator seed
- 
+
   // override the defaults with command lint switches.
   for (int k = 1; k < argc; k++) {
     if (strcmp(argv[k], "-t") == 0)
-      numThreads = atoi(argv[++k]);
+      numThreads = strtol(argv[++k], nullptr, 10);
     else if (strcmp(argv[k], "-r") == 0)
-      searchRad = (dkey_t)atoi(argv[++k]);
+      searchRad = (dkey_t)strtoll(argv[++k], nullptr, 10);
     else if (strcmp(argv[k], "-c") == 0)
-      numClusters = atoi(argv[++k]);
+      numClusters = strtoll(argv[++k], nullptr, 10);
     else if (strcmp(argv[k], "-p") == 0)
-      numPointsPer = atoi(argv[++k]);
+      numPointsPer = strtoll(argv[++k], nullptr, 10);
     else if (strcmp(argv[k], "-s") == 0)
-      clusterSpan = atoi(argv[++k]);
+      clusterSpan = strtoll(argv[++k], nullptr, 10);
     else if (strcmp(argv[k], "-g") == 0)
-      rngSeed = atoi(argv[++k]);
+      rngSeed = strtol(argv[++k], nullptr, 10);
     else if (strcmp(argv[k], "-h") == 0) {
       std::cout <<
         "-t [int]   Set number of threads\n" <<
@@ -79,7 +80,12 @@ int main(int argc, const char* argv[])
       exit(1);
     }
   }
-  
+
+ // std::cout << "threads = " << numThreads << " searchRad = " << searchRad << 
+ //              " numClusters = " << numClusters << " numPointsPer = " << numPointsPer << 
+ //              " clusterSpan = " << clusterSpan << " rngSeed = " << rngSeed << std::endl;
+  std::cout << "Creating artificially clustered data...." << std::endl;
+
   // Start by generating the center points of the clusters
   auto riLarge = RandomIntervalPDB(-clusterSpacing, clusterSpacing, rngSeed);
   int64_t* clusterCenters = new int64_t[numClusters*numDimensions];
@@ -118,7 +124,7 @@ int main(int argc, const char* argv[])
     window[i] = searchRad;
   }
 
-  std::cout << "Running DBSCAN clustering algorithm..." << std::endl;
+  std::cout << "Running NTDBSCAN clustering algorithm..." << std::endl;
   mtdbscan->setWindow(window);
   mtdbscan->setNumThreads(numThreads);
   double startTime = timeNow();
@@ -190,11 +196,16 @@ int main(int argc, const char* argv[])
   for (size_t i = 0; i < mtdbscan->getNumClusters(); i++) {
     mtdbscan->getClusterValueList(i)->sort();
   }
+  std::cout << "Sorting the clusters in MTDBSCAN by first value" << std::endl;
+  mtdbscan->sortClustersByFirstValue();
 
   std::cout << "Sorting the contents of all the clusters in DBSCAN" << std::endl;
   for (size_t i = 0; i < dbscan->getNumClusters(); i++) {
     dbscan->getClusterValueList(i)->sort();
   }
+  std::cout << "Sorting the clusters in DBSCAN by first value" << std::endl;
+  dbscan->sortClustersByFirstValue();
+
 
   // comparing exact contents
   // first sort all the contents of each cluster in both cluster results
@@ -202,13 +213,8 @@ int main(int argc, const char* argv[])
   // once a match has been found, check that the entire contents of both match.
   
   for (size_t i = 0; i < mtdbscan->getNumClusters(); i++) {
-    size_t j = 0;
-    for (; j < dbscan->getNumClusters(); j++) {
-      if (*mtdbscan->getClusterValueList(i)->begin() == *dbscan->getClusterValueList(j)->begin()) {
-        break;
-      }
-    }
-    if (j >= dbscan->getNumClusters()) {
+    size_t j = i;
+    if (*mtdbscan->getClusterValueList(i)->begin() != *dbscan->getClusterValueList(j)->begin()) {
       std::cout << "ERROR: No matching cluster found for MTDBSCAN cluster " << mtdbscan->getClusterID(i) << std::endl;
       exit(2);
     }
@@ -243,6 +249,8 @@ int main(int argc, const char* argv[])
       exit(2);
     }
   }
+
+  std::cout << "The contents of MTDBSCAN and DBSCAN are identical." << std::endl << std::endl;
 
   delete dbscan;
 

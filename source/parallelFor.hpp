@@ -13,7 +13,7 @@
 #include <vector>
 #include <numeric>
 
-//#define DEBUG
+//#define DEBUG_PRINT
 
 // parallel_for runs the equivalent to the statement "for (int i = begin; i < end; i++) fn(i);"
 // where fn is a lambda.  if num_segs is greater than 1, it divides the the begin-end number range 
@@ -33,7 +33,7 @@ void parallelFor(const RandomIt begin, const RandomIt end, FN fn, int64_t num_se
   // Compute the number of iterations to preform on each segment using a double to preserve the fraction.
   // using the method of iterating through bounds applied to each thread using a double and then rounding to
   // the nearest integer ensures that the difference in the number of iterations that each thread will do is 
-  // no greater than one.
+  // no greater than ofne.
   double seg_size = (double)n / (double)num_segs;
   int64_t sBeg = 0;
   double sEnd = seg_size;
@@ -46,7 +46,7 @@ void parallelFor(const RandomIt begin, const RandomIt end, FN fn, int64_t num_se
         std::lock_guard<std::mutex> guard(lock);
         std::cout << "parallel_for: n == " << le - lb << " thread: " << std::this_thread::get_id() << '\n';
       }
-#endif // DEBUG
+#endif // DEBUG_PRINT
       for (int64_t i = lb; i < le; i++) fn(begin + i);
       }, sBeg, llround(sEnd)));
     sBeg = llround(sEnd);
