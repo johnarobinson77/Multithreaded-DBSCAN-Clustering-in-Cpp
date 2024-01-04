@@ -1,18 +1,18 @@
 # A Multithreaded DBSCAN Clustering Implementation Using a K-d Tree
 
-The code included here implements the popular DBSCAN clustering algorithm [1] in C++. it is a multithreaded version of [DBSCAN-in-Cpp](https://github.com/johnarobinson77/DBSCAN-in-Cpp). Like the single-threaded version, this implementation uses a k-d tree to accelerate the process of building the clusters. The k-d tree code is also presented here. Using a k-d tree improves the clustering performance in three ways.
+The code included here implements the popular DBSCAN clustering algorithm [1] in C++. it is a multithreaded version of [DBSCAN-in-Cpp](https://github.com/johnarobinson77/DBSCAN-in-Cpp). Like the single-threaded version, this implementation uses a k-d tree to accelerate the cluster-building process. The k-d tree code is also presented here. Using a k-d tree improves the clustering performance in three ways.
 
 First, the k-d tree code presented here is highly optimized to build and search the tree using multithreading, significantly reducing the time needed for window searches.
 
 Second, it supports marking the nodes in the k-d tree in such a way that whole branches of the tree can be marked as already taken. This eliminates redundant visiting a node while building the clusters.
 
-Finally, it is used to facilitate multithreading the clustering algorithm itself. In the single-threaded version, the process of building the k-d tree is multithread, but the process of creating the clusters is single-threaded. In this multithreaded version, the clustering algorithm is also multithreaded and as described later, the k-d tree is used to overcome the issues arising from multi-threading.
+Finally, it is used to facilitate multithreading the clustering algorithm itself. In the single-threaded version, the process of building the k-d tree is multithread, but the process of creating the clusters is single-threaded. In this multithreaded version, the clustering algorithm is also multithreaded, and as described later, the k-d tree is used to overcome the issues arising from multi-threading.
 
 Note that because of the overhead required to implement multithreading, the multithreaded version using a single thread is not as fast as the single-threaded version. If multithreading is not required, use [DBSCAN-in-Cpp](https://github.com/johnarobinson77/DBSCAN-in-Cpp).
 
 ## Usage
 
-This implementation assumes there is a set of data that have a position in some n-space, geometric or otherwise. The position is represented in a vector of K type numbers and an object called a value here, which can be an object or pointer to an object. Each position and value is presented as a pair to the MTDBSCAN object. Also, a cluster window needs to be provided. After running the clustering procedure, a list of clusters will be available where each cluster will be a list of the values presented to the MTDBSCAN object earlier.
+This implementation assumes a set of data has a position in some n-space, geometric or otherwise. The position is represented in a vector of K-type numbers and an object called a value here, which can be an object or pointer to an object. Each position and value is presented as a pair to the MTDBSCAN object. Also, a cluster window needs to be provided. After running the clustering procedure, a list of clusters will be available where each cluster will be a list of the values presented to the MTDBSCAN object earlier.
 
 In the example below, that data is stored as a class in the Locations class. The usage steps are as follows:
 
@@ -30,11 +30,11 @@ This source code example below can be found in the main function in DBSCANtest.c
 	:
  std::cout << "Adding data to DBSCAN..." << std::endl;
   auto mtdbscan = new MTDBSCAN< dkey_t, dval_t, numDimensions>;
-  // Add each pair points and values to the dbscan object
+  // Add each pair of points and values to the dbscan object
   for (size_t i = 0; i < numPoints; ++i) {
     mtdbscan->addPointWithValue(coordinates[i], i);
   }
-  // get the search range to about cluster distance window
+  // get the search range about cluster distance window
   std::vector<dkey_t> window(numDimensions);
   for (int i = 0; i < numDimensions; i++) {
     window[i] = searchRad;
@@ -96,14 +96,14 @@ Note that this interface is exactly the same as the single-threaded version in [
   // addPointWithValuefuction adds a point or key and an associated value to the dbscan object
   size_t addPointWithValue(std::vector<K> point, V value)
 
-  // setWindow sets the clustering widnow size
+  // setWindow sets the clustering window size
   void setWindow(std::vector<K>& window)
 
-  // build builds the clusters.  All points and vaules must be added first.
+  // build builds the clusters.  All points and values must be added first.
   // It will return false if called a second time after dbscan was constructed.
   bool build()
 
-  //sortClusterBySize sorts the cluster by number of values in the cluster from largest to smallest
+  //sortClusterBySize sorts the cluster by the number of values in the cluster from largest to smallest
   void sortClustersBySize()
 
   // cluster setters and getters
@@ -113,11 +113,11 @@ Note that this interface is exactly the same as the single-threaded version in [
   // getClusterValueList returns the list of values in cluster clusterIdx
   std::list<V>* getClusterValueList(size_t clusterIdx) 
 
-  // getClusterMaxCorner returns the a vector of the maximum corner of the
+  // getClusterMaxCorner returns a vector of the maximum corner of the
   // bounding hypercube of cluster clusterIdx
   std::vector<K>* getClusterMaxCorner(size_t clusterIdx)
 
-  // getClusterMinCorner returns the a vector of the minimum corner of the
+  // getClusterMinCorner returns a vector of the minimum corner of the
   // bounding hypercube of cluster clusterIdx
   std::vector<K>* getClusterMinCorner(size_t clusterIdx) 
 
@@ -130,10 +130,10 @@ Note that this interface is exactly the same as the single-threaded version in [
   // getNumClusters returns the number of clusters
   size_t getNumClusters()
 
-  // checCluster does some basic check on the clusters and print some statistics
+  // checCluster does some basic checks on the clusters and prints some statistics
   bool checkClusters(const size_t numLocations, const std::string* tag = nullptr)  
 
- // Sets the number of threads used for building the clusters.  The default is to use the hardware concurrancy value for the current processor.
+ // Sets the number of threads used for building the clusters.  The default is to use the hardware concurrency value for the current processor.
   void setNumThreads(int64_t thd = -1)
 ```
 
@@ -146,15 +146,15 @@ A cluster in DBSCAN is a set of points that are all within a user-defined distan
 The process of building a cluster is relatively straightforward.
 
 1. Pick an arbitrary point from the data set and create a new cluster starting with that point.
-2. For each point in the cluster, search for all the points in the data set that are within the user-defined distance and add them to the cluster. Include the new points in the cluster as you go.
-3. Once the search around all the points in the cluster is complete and no new points have been added to the cluster, that cluster is complete.
+2. For each point in the cluster, search for all the data set points within the user-defined distance and add them to the cluster. Include the new points in the cluster as you go.
+3. Once the search around all the points in the cluster is complete, and no new points have been added to the cluster, that cluster is complete.
 4. Request the next arbitrary point from the data set not already added to a cluster. If a point is returned, repeat from step 2. If no points are left, the clustering process is complete.
 
 In the code provided here, the data set is stored in a k-d tree where each point in the original data set is represented by a node in the tree. The picking and searching operations described above are performed on the k-d tree. When a point is added to a cluster by the picking or searching operation, its node in the tree is marked as taken, and that point is ignored on all subsequent operations.
 
 ### Issues with Multi-threading the Clustering Process
 
-At first, it might seem that you could start multiple threads, each building its list of clusters. When all threads have returned, simply concentrate the per-thread lists into a single list of clusters. But consider the possibility that two threads may pick different points that eventually want to be placed in the same cluster. Since the picking process chooses arbitrary untaken points, there is nothing that guarantees this won't happen. The probability that it will happen within a multi-threaded cluster build process is near 100%.
+At first, it might seem that you could start multiple threads, each building its own list of clusters. When all threads have returned, simply concentrate the per-thread lists into a single list of clusters. But consider the possibility that two threads may pick different points that eventually want to be placed in the same cluster. Since the picking process chooses arbitrary untaken points, there is nothing that guarantees this won't happen. The probability that it will happen within a multi-threaded cluster build process is near 100%.
 
 The result of the multithreaded process is that some clusters have been split into two or more sub-clusters. Worse, which clusters have been split will change from run to run, depending on the timing of how the threads interact. This happens even when rerunning the process on the same data set.
 
@@ -177,24 +177,24 @@ To find and merge these subclusters, the following post-clustering process is pe
 2. Merge all the subclusters in the overlap graph into the initiating cluster by calling the overlapMerge() function with a pointer to the initiating cluster and a pointer to the overlap std::set. The overlapMerge() function iterates over the overlap set.
   1. If an overlap cluster is zero length or is the same as the initiating cluster, it is skipped over because it indicates a loop in the graph.
   2. If not, its values are added to the initiating cluster, and its length is zeroed. Then overlapMerge is called with its overlap set and a pointer to the initiating cluster.
-3. When all subclusters have been merged into final clusters, scan the cluster list again and remove all zero-length clusters. Also, delete any non-null overlap std::stes as they are no longer needed. In this implementation, this "cleaning" function is done as part of a move from the per-thread lists to the final consolidated cluster list.
+3. When all subclusters have been merged into final clusters, scan the cluster list again and remove all zero-length clusters. Also, delete any non-null overlap std::stes as they are no longer needed. This "cleaning" function is done in this implementation as part of a move from the per-thread lists to the final consolidated cluster list.
 
 ### Other Performance Considerations
 
 While overlapping subclusters are functionally resolved, they hinder performance and should be avoided as much as possible. A way to do that is for each thread to work on clusters that are geometrically as far apart as possible. The points in the most widely separated clusters will be on opposite sides of the k-d tree.
 
-The picker function that is used to provide a seed point for a new cluster has a selectionBias parameter that is used to select a path through the k-d tree. The thread number is used to create a selectionBias that chooses a seed point that is as far away as possible from the other thread.
+The picker function used to provide a seed point for a new cluster has a selectionBias parameter used to select a path through the k-d tree. The thread number is used to create a selectionBias that chooses a seed point that is as far away as possible from the other thread.
 
 Another optimization is to mark each child branch in a node in the k-d tree with an index of a cluster that has used all of the points below. If a search for a cluster with the same index is performed, that branch can be skipped. However, if a search for a cluster with a different index is in progress, that branch still needs to be searched for only overlaps.
 
 ### Performance Pothole
-There is one performace pothole with the current code that can cause extreme performance degradation.  This happens when the search distamce is large relative to the area containing the data set such that the results will end up with just a few cluster.  The requirement that a thread must search for a point in the cluster it's forming that have been taken by other clusters can result in cery large serch times in the k-d tree.  This performace degredation is only present when running multithreaded.  Running single threaded will resolve the issue.
+There is one performance pothole with the current code that can cause extreme performance degradation.  This happens when the search region is large relative to the area containing the data set, such that the results will end up with just a few clusters.  The requirement that a thread must search for a point in the cluster it's forming that has been taken by other clusters can result in very large search times in the k-d tree.  This performance degradation is only present when running multithreaded.  The current code may slow down as much as 4x relative to single threading.  
 
-Doing dbscan clustering with such a large search region is, in general, not very usefull.  However, it may not be avoidable depending on how the algorithm is used.  There are several ways that this performance pothole could be mitigated which are being explored. 
+Doing dbscan clustering with such a large search region is generally not very useful.  However, depending on the algorithm's use, it may not be avoidable.  There are several ways that this performance pothole is being mitigated, and more are being explored. 
 
 ## Results
 
-The chart below shows how processing time diminishes with increasing thread.  This performance data was taken on a 64-core Graviton processor on AWS.  The performance flattens out above 32 thread, likely due to memory bandwidth and an increase number of overlapping sub clusters.  The data set is 1600 artificially created groups of 4000 3-dimentional points each.  The search region is chosen to identify those groups as clusters.  This is the default settings in DBSCANtest.cpp.
+The chart below shows how processing time diminishes with increasing thread.  This performance data was taken on a 64-core Graviton processor on AWS.  The performance flattens out above 32 threads, likely due to memory bandwidth and increased overlapping sub-clusters.  The data set is 1600 artificially created groups of 4000 3-dimensional points each.  The search region is chosen to identify those groups as clusters.  These are the default settings in DBSCANtest.cpp.
 
 ![Multithreaded DBSCAN Performance](https://github.com/johnarobinson77/Multithreaded-DBSCAN-Clustering-in-Cpp/blob/main/MTDBSCAN.PNG)
 
