@@ -9,7 +9,7 @@
 
 //#define DEBUG_PRINT  // enable this to add debug print messages.  must be defined befor including MTDBSCAN.hpp
 //#define COMPARISON_TEST // enables a full comparison of clusters between the multithreaded DBSCAN and single threaded DBSCAN
-//#define MEASURE_KDTREE_TIME
+//#define MEASURE_KDTREE_TIME // enables printing of the time to build the k-d tree  which is also included in the total time.
 
 #include "MTDBSCAN.hpp"
 #ifdef COMPARISON_TEST
@@ -66,12 +66,12 @@ int main(int argc, const char* argv[])
       rngSeed = strtol(argv[++k], nullptr, 10);
     else if (strcmp(argv[k], "-h") == 0) {
       std::cout <<
-        "-t [int]   Set number of threads\n" <<
-        "-r [int]   Set size of cluster search radius\n" <<
         "-c [int]   Set number of clusters\n" <<
-        "-p [int]   Number of points per cluster\n" <<
-        "-s [int]   Span of the points in a cluster\n" <<
-        "-g [int]   Data random number generator seed\n" <<
+        "-p [int]   Set Number of points per cluster\n" <<
+        "-s [int]   Set Span of the points in a cluster\n" <<
+        "-r [int]   Set size of cluster search window\n" <<
+        "-t [int]   Set number of threads\n" <<
+        "-g [int]   Set random number generator seed\n" <<
         "-h         Print this message" <<
         std::endl;
       exit(0);
@@ -81,9 +81,8 @@ int main(int argc, const char* argv[])
     }
   }
 
- // std::cout << "threads = " << numThreads << " searchRad = " << searchRad << 
- //              " numClusters = " << numClusters << " numPointsPer = " << numPointsPer << 
- //              " clusterSpan = " << clusterSpan << " rngSeed = " << rngSeed << std::endl;
+  std::cout << "number of clusters = " << numClusters << " number of points per cluster = " << numPointsPer << " cluster span = " << clusterSpan <<
+               "\nsearch window = " << searchRad << " threads = " << numThreads << " random number seed = " << rngSeed << std::endl << std::endl;
   std::cout << "Creating artificially clustered data...." << std::endl;
 
   // Start by generating the center points of the clusters
@@ -124,7 +123,7 @@ int main(int argc, const char* argv[])
     window[i] = searchRad;
   }
 
-  std::cout << "Running NTDBSCAN clustering algorithm..." << std::endl;
+  std::cout << "Running MTDBSCAN clustering algorithm..." << std::endl;
   mtdbscan->setWindow(window);
   mtdbscan->setNumThreads(numThreads);
   double startTime = timeNow();

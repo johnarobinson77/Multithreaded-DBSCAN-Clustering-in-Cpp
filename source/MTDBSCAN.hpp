@@ -134,7 +134,7 @@ class MTDBSCAN {
   // this vector contains the distance to the edge of the search window in each dimension.
   std::vector<K> clusterWindowRadius;
 
-  bool buildCluster(std::list<Cluster*>* clusters, std::list<Cluster*>* overlaps, int64_t threadNum) {
+  bool buildCluster(std::list<Cluster*>* clusters, std::list<Cluster*>* overlaps, int64_t threadNum, bool oneTime = false) {
     std::vector<K> qLower(N);  //allocate 2 vectors for the upper and lower corners of the window
     std::vector<K> qUpper(N);
     auto keys = new std::list<K*>();  // hold the list of the points to be searched for a cluster.
@@ -184,6 +184,7 @@ class MTDBSCAN {
         }
       }
       newCluster = new Cluster(IDCounter, IDCounterMutex);  // create a new cluster
+      if (oneTime) break;
     }
     delete keys;
     return true;
@@ -292,21 +293,29 @@ public:
     std::vector<std::list<Cluster*>*> clustersPerThread;
     std::vector<std::list<Cluster*>*> overlapClusters;
 
-    // create a temporary cluster list for each thread.
-    // and start start the threads.
+    // Create a temporary cluster list for each thread.
+    // Add one cluster to each befor starting multithreading.  This is
+    // done to mitigate the performance pothole when the search region is large
+    // relative to the the region of the data.
     for (int i = 0; i < numThreads; i++) {
       clustersPerThread.push_back(new std::list<Cluster*>);
       overlapClusters.push_back(new std::list<Cluster*>);
+      returnStatus &= buildCluster( clustersPerThread[i], overlapClusters[i], i, true);
+    }
+
+     //Now start start the individual threads.
+    for (int i = 0; i < numThreads; i++) {
       futures.push_back(std::async(std::launch::async,
-        &MTDBSCAN<K, V, N>::buildCluster, this, clustersPerThread[i], overlapClusters[i], i));
+        &MTDBSCAN<K, V, N>::buildCluster, this, clustersPerThread[i], overlapClusters[i], i, false));
     }
 
     // get the results back from each thread.
     for (int i = 0; i < futures.size(); i++) 
-     returnStatus = returnStatus && futures[i].get();
+     returnStatus &= returnStatus && futures[i].get();
 
-    if (returnStatus == true) { // if there were no errors in the threaded clustering,
-      // combine any clusters that were found to have overlapping points during the clustering process
+    // if there were no errors in the threaded clustering,
+    // combine any clusters that were found to have overlapping points during the clustering process
+    if (returnStatus == true) { 
       for (int i = 0; i < numThreads; i++) {  // iterate through per thread cluster lists
         //std::cout << "cl = " << clustersPerThread[i]->size() << " ov = " << overlapClusters[i]->size() << std::endl;
         for (Cluster* cl : *overlapClusters[i]) { // iterate through the overlap clusters
@@ -329,7 +338,11 @@ public:
         }
       }
     }
-    // and clean up the temporary lists.
+    else {
+      std::cout << "ERROR: an error occurred during the cluster build process." << std::endl;
+    }
+
+    // Clean up the temporary lists.
     for (int i = 0; i < numThreads; i++) {
       delete overlapClusters[i];
       delete clustersPerThread[i];
@@ -338,7 +351,7 @@ public:
     delete kdTree;
     kdTree = nullptr;
     return returnStatus;
-    }
+  }
 
   // sortClusterBySize sorts the cluster by number of values in the cluster 
   // from largest to smallest
