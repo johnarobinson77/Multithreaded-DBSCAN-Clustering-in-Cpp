@@ -16,7 +16,10 @@
 
 #include <iostream>
 #include <algorithm>
+#include <atomic>
+#include <stdexcept>
 #include "KdTreePDB.hpp"
+#include "avlSet.h"
 
 
 template <typename K, typename V, size_t N>
@@ -27,6 +30,7 @@ class MTDBSCAN {
   typedef std::pair<K*, std::list<V>*> retPair_t;
 
   int64_t numThreads = -1;  //number of threads to be used throughout the process
+  int64_t numValues = 0;    //number of point,value pairs added to the cluster. 
 
   // this struct maintains a bounding hyper rectangle
   struct bounds {
@@ -87,7 +91,7 @@ class MTDBSCAN {
     std::list<V>* values = nullptr;  // the value list
     bounds_t clusterBounds{ N }; // the minimum corner of a bounding hyper rectangle
     std::string* tag = nullptr; // optional tag string
-    std::set<Cluster*>* overlaps = nullptr; // pointer to a cluster that this cluster overlaps with.
+    avlSet<Cluster*>* overlaps = nullptr; // pointer to a cluster that this cluster overlaps with.
     uint32_t ID = 0;
 
 
@@ -137,11 +141,11 @@ class MTDBSCAN {
   bool buildCluster(std::list<Cluster*>* clusters, std::list<Cluster*>* overlaps, int64_t threadNum, bool oneTime = false) {
     std::vector<K> qLower(N);  //allocate 2 vectors for the upper and lower corners of the window
     std::vector<K> qUpper(N);
-    auto keys = new std::list<K*>();  // hold the list of the points to be searched for a cluster.
+    auto keys = new std::list<K*>();  // holds the list of the points to be searched for a cluster.
     retPair_t retPair;
     std::list<retPair_t*> retPairs;  // list of returned pairs from the kdTree Search
     //  create a selector for each thread that is as disparate as possible from the other thread.
-    int64_t numThreadsMSB = ceill(log2((float)numThreads))-1;
+    int64_t numThreadsMSB = static_cast<int64_t>(ceill(log2((float)numThreads)))-1;
     uint64_t selectionBias;
     if (((static_cast<int64_t>(0x1) << numThreadsMSB) & threadNum) == 0) {
       selectionBias = threadNum;
@@ -150,7 +154,7 @@ class MTDBSCAN {
       selectionBias = (0xFFFFFFFFFFFFFFFF << numThreadsMSB) | threadNum;
     }
     Cluster* newCluster = new Cluster(IDCounter, IDCounterMutex);  // create a new cluster
-    while (kdTree->pickValue(retPair, selectionBias, newCluster, true)) {  // pick an initial cluster point until no more points
+    while (kdTree->pickValue(retPair, selectionBias, newCluster)) {  // pick an initial cluster point until no more points
       keys->clear();
       newCluster->addToCluster(retPair.first, retPair.second); // add the picked Point to the cluster to the cluster
       keys->push_back(retPair.first);              // add the point to the keys list
@@ -163,14 +167,6 @@ class MTDBSCAN {
         }
         retPairs.clear();
         kdTree->searchRegionAndRemove(retPairs, qLower, qUpper, newCluster); //search the tree for points within the window
-        /*{
-          static std::mutex pr1;
-          static uint64_t cntr = 0;
-          std::lock_guard<std::mutex> guard(pr1);
-          if ((cntr & 0x7f) == 0) std::cout << threadNum << ": " << cntr << " " << retPairs.size() << std::endl;
-          cntr++;
-        }*/
-
         for (retPair_t* kit : retPairs) { // add the points to the keys list and cluster
           keys->push_back(kit->first);
           newCluster->addToCluster(kit->first, kit->second);
@@ -195,11 +191,14 @@ class MTDBSCAN {
   // looks for any cluster linked to that cluster by recurring on it's overlap list.
   // if the cluster being inspected is a zero-length cluster, that means that its's data and the data in
   // all the clusters below it have already been copied so it can be skipped.
-  void overlapMerge(std::set<Cluster*>* overlaps, Cluster* initialCluster, int depth) {
+  void overlapMerge(avlSet<Cluster*>* overlaps, Cluster* initialCluster, int depth) {
 #ifdef DEBUG_PRINT
     int cnt = 0;
 #endif
-    for (Cluster* thisOverlap : *overlaps) { // iterate through the overlaps.
+    std::vector<Cluster*> overlapClusters(overlaps->size());
+    overlaps->getKeys(overlapClusters);
+    for (Cluster* thisOverlap : overlapClusters) { // iterate through the overlaps.
+    
 #ifdef DEBUG_PRINT
       cnt++;
       int64_t sz = thisOverlap->values->size();
@@ -215,11 +214,10 @@ class MTDBSCAN {
       initialCluster->combine(thisOverlap);  // combine this overlap, clusters data into initialCluster
       thisOverlap->values->clear();          // and zero it's length
       if (depth >= numThreads * 10) {          // maximum number of search recursions should not exceed numThreads x 10
-        std::cout << "Internal ERROR: maximum possible number of linked overlapped clusters exceeded on cluster " <<
-          initialCluster->getID() << std::endl;
-        return;  // TODO: replace with a try/catch
+        throw std::runtime_error("Internal ERROR: maximum possible number of linked overlapped clusters exceeded on cluster ");
       }
-      overlapMerge(thisOverlap->overlaps, initialCluster, depth + 1); // go to the next level
+      if (thisOverlap->overlaps != nullptr)
+        overlapMerge(thisOverlap->overlaps, initialCluster, depth + 1); // go to the next level
     }
     return;
   }
@@ -255,7 +253,8 @@ public:
 
   // addPoint fuction adds a point or key and an associated value to the MTDBSCAN object
   size_t addPointWithValue(std::vector<K> point, V value) {
-    return kdTree->add(point, value);
+    numValues = kdTree->add(point, value);
+    return numValues;
   }
 
   // setWindow sets the clustering widnow size
@@ -264,16 +263,11 @@ public:
   }
 
 #ifdef MEASURE_KDTREE_TIME
-  double kdTreeTime;
+  std::chrono::steady_clock::time_point kdtBefore;
+  std::chrono::steady_clock::time_point kdtAfter;
   // get the current time as a double.  Used for evaluating performance.
-  double timeNow() {
-    struct timespec now;
-    if (timespec_get(&now, TIME_UTC) != TIME_UTC) printf("timespec_get failure\n");
-    double dblTime = (double)now.tv_sec + (double)now.tv_nsec * 1e-9;
-    return dblTime;
-  }
   double getKdTreeTime() {
-    return kdTreeTime;
+    return std::chrono::duration<double>(kdtAfter - kdtBefore).count();
   }
 #endif
 
@@ -281,11 +275,11 @@ public:
   // It will return false if called a second time after MTDBSCAN was constructed.
   bool build() {
 #ifdef MEASURE_KDTREE_TIME
-    double kdStartTime = timeNow();
+    kdtBefore = std::chrono::steady_clock::now();
 #endif
     if (kdTree != nullptr && kdTree->buildTree() == false) return false;  // build a kdTree using default threads.
 #ifdef MEASURE_KDTREE_TIME
-    kdTreeTime = timeNow() - kdStartTime;
+    kdtAfter = std::chrono::steady_clock::now();
 #endif
 
     bool returnStatus = true;
@@ -300,7 +294,7 @@ public:
     for (int i = 0; i < numThreads; i++) {
       clustersPerThread.push_back(new std::list<Cluster*>);
       overlapClusters.push_back(new std::list<Cluster*>);
-      returnStatus &= buildCluster( clustersPerThread[i], overlapClusters[i], i, true);
+      //returnStatus = returnStatus && buildCluster( clustersPerThread[i], overlapClusters[i], i, true);
     }
 
      //Now start start the individual threads.
@@ -311,19 +305,44 @@ public:
 
     // get the results back from each thread.
     for (int i = 0; i < futures.size(); i++) 
-     returnStatus &= returnStatus && futures[i].get();
+      returnStatus = returnStatus && futures[i].get();
 
-    // if there were no errors in the threaded clustering,
-    // combine any clusters that were found to have overlapping points during the clustering process
-    if (returnStatus == true) { 
-      for (int i = 0; i < numThreads; i++) {  // iterate through per thread cluster lists
+    if (returnStatus == true) {
+
+
+    // loop through all of the overlapsClusters an make sure there is a bidirectional link to every cluster
+/*      for (int i = 0; i < numThreads; i++) {  // iterate through per thread cluster lists
         //std::cout << "cl = " << clustersPerThread[i]->size() << " ov = " << overlapClusters[i]->size() << std::endl;
         for (Cluster* cl : *overlapClusters[i]) { // iterate through the overlap clusters
-          if (cl->overlaps != nullptr && cl->values->size() != 0) {  // Check to see if are non-zero-length overlaps
-            overlapMerge(cl->overlaps, cl, 0);  // combine those overlaps into this cluster
+          for (Cluster* cl1 : *cl->overlaps) {
+            if (cl1->overlaps == nullptr) {
+              cl1->overlaps = new std::set<Cluster*>;
+            }
+            cl1->overlaps->insert(cl);
           }
         }
       }
+      */
+    // if there were no errors in the threaded clustering,
+    // combine any clusters that were found to have overlapping points during the clustering process
+      //size_t clcnt = 0, ovcnt = 0;
+      for (int i = 0; i < numThreads; i++) {  // iterate through per thread cluster lists
+       // clcnt += clustersPerThread[i]->size();
+        //ovcnt += overlapClusters[i]->size();
+        //std::cout << "cl = " << clustersPerThread[i]->size() << " ov = " << overlapClusters[i]->size() << std::endl;
+        for (Cluster* cl : *clustersPerThread[i]) { // iterate through the overlap clusters
+          if (cl->overlaps != nullptr && cl->values->size() != 0) {  // Check to see if are non-zero-length overlaps
+            try {
+              overlapMerge(cl->overlaps, cl, 0);  // combine those overlaps into this cluster
+            }
+            catch (std::runtime_error& e) {
+              std::cerr << e.what() << std::endl;
+              exit(1);
+            }
+          }
+        }
+      }
+      //std::cout << "cl = " << clcnt << " ov = " << ovcnt << std::endl;
 
       // Move the contents temporary per-thread cluster lists to the final cluster vector.
       // Exclude clusters and delete those clusters that have no values.
@@ -339,7 +358,7 @@ public:
       }
     }
     else {
-      std::cout << "ERROR: an error occurred during the cluster build process." << std::endl;
+      std::cerr << "ERROR: an error occurred during the cluster build process." << std::endl;
     }
 
     // Clean up the temporary lists.
@@ -355,12 +374,21 @@ public:
 
   // sortClusterBySize sorts the cluster by number of values in the cluster 
   // from largest to smallest
-  void sortClustersBySize() {
-    parallelSort(clusters->begin(), clusters->end(),
-      [](const Cluster* a, const Cluster* b) -> bool
-      {
-        return a->values->size() > b->values->size();
-      });
+  void sortClustersBySize(bool smallestFirst = false) {
+    if (!smallestFirst) {
+      parallelSort(clusters->begin(), clusters->end(),
+        [](const Cluster* a, const Cluster* b) -> bool
+        {
+          return a->values->size() > b->values->size();
+        });
+    }
+    else {
+      parallelSort(clusters->begin(), clusters->end(),
+        [](const Cluster* a, const Cluster* b) -> bool
+        {
+          return a->values->size() < b->values->size();
+        });
+    }
   }
 
  // sortClusterByFirstValue sorts the cluster by the first value in the cluster 

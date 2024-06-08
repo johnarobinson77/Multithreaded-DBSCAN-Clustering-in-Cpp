@@ -4,385 +4,277 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-//
-//  KdTreePDB.h
-//  KdTree
-//
-//  Created by John Robinson on 11/18/23.
-//
+ //
+ //  KdTreePDB.h
+ //
+ //  Created by John Robinson on 11/18/23.
+ // 
+ //  Note that most of the code contained here is original code written
+ //  by the author.  However, the code specific to building the kdTree,
+ //  specifically the createKdTree function in the kKdNode class and the
+ //  functions it calls were taken from code written by Russel Brown and  
+ //  can found at https://github.com/chezruss/kd-tree.
+ //
+
+
 
 #ifndef KDTREE_HPP
 #define KDTREE_HPP
-#include <random>
-#include <limits>
-#include <math.h>
-#include <time.h>
-#include <stdlib.h>
-#include <string.h>
+
 #include <vector>
 #include <list>
 #include <set>
-#include <iostream>
-#include <iomanip>
 #include <exception>
 #include <future>
 #include "parallelSort.hpp"
+#include "avlSet.h"
+#include "SimpleSet.h"
 
 /*
  * This type is the signed equivalent of size_t and might be equivalent to intmax_t
  */
 typedef int64_t signed_size_t;
 
-// a slight rewrite of the Romdomer class from
-// https://stackoverflow.com/questions/13445688/how-to-generate-a-random-number-in-c/53887645#53887645
-class RandomIntervalPDB {
-  // random seed by default
-  std::mt19937 gen_;
-  std::uniform_int_distribution<int64_t> dist_;
 
-public:
-  RandomIntervalPDB(int64_t min, int64_t max, unsigned int seed = std::random_device{}())
-    : gen_{ seed }, dist_{ min, max } {}
-
-  // if you want predictable numbers
-  void SetSeed(unsigned int seed) { gen_.seed(seed); }
-
-  int64_t operator()() { return dist_(gen_); }
-};
-
-enum SearchRet { // the following are codes that the search routines will return fom a on the status of then node visited.
-  DeadNode,                 // indicates the values, ltChile and gtChild pointer are all null.
+enum SearchRet { // The following are codes that the search routines will return indicating the status of then child node visited.
+  Undefined,                // indicates the values, ltChile and gtChild pointer are all null.
   NoResult,                 // indicates no result has been returned.
-  ResultFound,              // indicates a results has been found.
-  ResultFoundAndTakenByID,  // indicates results has been found and all nodes below that node have been taken by current cluster
-  AllTakenByID,             // indicates a result has not been found but all nodes below have been taken by current cluster
-  ResultFoundAndTaken,      // indicates a result has been found and all nodes below have been taken by different clusters
-  AllTaken                  // indicates a result has not been found but all nodes below have been taken by different clusters
+  AllTakenByID,             // indicates all nodes below have been taken by current cluster
+  AllTaken,                 // indicates all nodes below have been taken by different clusters
 };
 
-// this is the constant that is used to indicate all taken when the nices below do not match all IDs.
+// this is an ID that is used to indicate all taken when the nodes below do not match all IDs.
 const uint32_t allTakenID = 0xFFFFFFFF;
 
+// the KdTreePDB class provide a user interface wrapper around the kdNodePDB objects that 
+// form the actual k-d tree.
 template<typename K, typename V, typename M, size_t N>
-class KdNodePDB {
+class KdTreePDB {
 
+  // this is ther return type
   typedef std::pair<K*, std::list<V>*> retPair_t;
 
-public:
-  K tuple[N];
-private:
-  KdNodePDB<K, V, M, N>* ltChild;
-  KdNodePDB<K, V, M, N>* gtChild;
-  std::list<V>* values = nullptr;
-  std::mutex thisMutex;
-  M* movedTo = nullptr;        // pointer to the container that is holding the values that were here.
-  uint32_t  gtAllTaken = 0;    // ID of the container that has all values from the child nodes below
-  uint32_t  ltAllTaken = 0;    // ID of the container that has all values from the child nodes below
+  class KdNodePDB {
 
-public:
-  KdNodePDB(V const value) { // Pass non-primitive types as 'V const&'
-    for (size_t i = 0; i < N; i++) this->tuple[i] = (K)0;
-    ltChild = gtChild = nullptr; // redundant
-    values = new std::list<V>();
-    values->push_back(value);
-  }
+    typedef std::pair<K*, std::list<V>*> retPair_t;
 
-  KdNodePDB(std::vector<K>& tuple, V const value) { // Pass non-primitive types as 'V const&'
-    for (size_t i = 0; i < N; i++) this->tuple[i] = tuple[i];
-    ltChild = gtChild = nullptr; // redundant
+  public:
+    K tuple[N];
+  private:
+    KdNodePDB* ltChild;
+    KdNodePDB* gtChild;
+    std::list<V>* values = nullptr;
+    std::mutex thisMutex;
+    M* movedTo = nullptr;        // pointer to the container that is holding the values that were here.
+    SimpleSet allTakenSet;       // set of IDs of the containers that have taken values this an all nodes below.
+
+  public:
+    KdNodePDB(V const value) { // Pass non-primitive types as 'V const&'
+      for (size_t i = 0; i < N; i++) this->tuple[i] = (K)0;
+      ltChild = gtChild = nullptr; // redundant
       values = new std::list<V>();
-    values->push_back(value);
-  }
-
-public:
-  ~KdNodePDB() {
-    delete values;
-  }
-
-public:
-  K const* getTuple() {
-    return this->tuple;
-  }
-
-  /*
-    * The superKeyCompare function compares two K arrays in all k dimensions,
-    * and uses the sorting or partition coordinate as the most significant dimension.
-    *
-    * Calling parameters:
-    *
-    * a - a K*
-    * b - a K*
-    * p - the most significant dimension
-    *
-    * returns a K result of comparing two K arrays
-    */
-private:
-  inline
-    static K superKeyCompare(K const* a, K const* b, size_t p) {
-    // Typically, this first calculation of diff will be non-zero and bypass the 'for' loop.
-    K diff = a[p] - b[p];
-    for (size_t i = 1; diff == 0 && i < N; i++) {
-      size_t r = i + p;
-      // A fast alternative to the modulus operator for (i + p) < 2 * N.
-      r = (r < N) ? r : r - N;
-      diff = a[r] - b[r];
+      values->push_back(value);
     }
-    return diff;
-  }
 
-  /*
-    * The removeDuplicates function checks the validity of the merge sort and
-    * removes duplicates from the kdNodes array.
-    *
-    * Calling parameters:
-    *
-    * kdNodes - a KdNode** array that has been sorted via merge sort according to (x,y,z,w...) tuples
-    * i - the leading dimension for the super key
-    *
-    * returns the end index of the reference array following removal of duplicate elements
-    */
-private:
-  inline
-    static size_t removeDuplicates(KdNodePDB<K, V, M, N>** kdNodes, size_t i, size_t size) {
-    size_t end = 0;
-    for (size_t j = 1; j < size; ++j) {
-      K compare = superKeyCompare(kdNodes[j]->tuple, kdNodes[end]->tuple, i);
-      if (compare < 0) {
-        std::cout << "merge sort failure: superKeyCompare(kdNodes[" << j << "], kdNodes["
-          << end << "], " << i << ") = " << compare << std::endl;
-        exit(1);
+    KdNodePDB(std::vector<K>& tuple, V const value) { // Pass non-primitive types as 'V const&'
+      for (size_t i = 0; i < N; i++) this->tuple[i] = tuple[i];
+      ltChild = gtChild = nullptr; // redundant
+      values = new std::list<V>();
+      values->push_back(value);
+    }
+
+  public:
+    ~KdNodePDB() {
+      delete values;
+    }
+
+  public:
+    K const* getTuple() {
+      return this->tuple;
+    }
+
+    /*
+      * The superKeyCompare function compares two K arrays in all k dimensions,
+      * and uses the sorting or partition coordinate as the most significant dimension.
+      *
+      * Calling parameters:
+      *
+      * a - a K*
+      * b - a K*
+      * p - the most significant dimension
+      *
+      * returns a K result of comparing two K arrays
+      */
+  private:
+    inline
+      static K superKeyCompare(K const* a, K const* b, size_t p) {
+      // Typically, this first calculation of diff will be non-zero and bypass the 'for' loop.
+      K diff = a[p] - b[p];
+      for (size_t i = 1; diff == 0 && i < N; i++) {
+        size_t r = i + p;
+        // A fast alternative to the modulus operator for (i + p) < 2 * N.
+        r = (r < N) ? r : r - N;
+        diff = a[r] - b[r];
       }
-      else if (compare > 0) {
-        // Keep the jth element of the kdNodes array.
-        kdNodes[++end] = kdNodes[j];
-      }
-      else {
-        // append vales to the end of the kept kdNode and delete the now unused node
-        kdNodes[end]->values->splice(kdNodes[end]->values->end(), *kdNodes[j]->values);
-        delete kdNodes[j];
-      }
+      return diff;
     }
-    return end;
-  }
 
-  /*
-    * The buildKdTree function builds a k-d tree by recursively partitioning
-    * the reference arrays and adding KdNodes to the tree.  These arrays
-    * are permuted cyclically for successive levels of the tree in
-    * order that sorting occur in the order x, y, z, w...
-    *
-    * Calling parameters:
-    *
-    * reference - a KdNode*** array to recursively sort via its (x, y, z, w...) tuples array
-    * temporary - a KdNode*** temporary array from which to copy sorted results;
-    * start - start element of the reference array
-    * end - end element of the reference array
-    * maximumSubmitDepth - the maximum tree depth at which a child task may be launched
-    * depth - the depth in the tree
-    *
-    * returns: a KdNode pointer to the root of the k-d tree
-    */
-private:
-  static KdNodePDB<K, V, M, N>* buildKdTree(KdNodePDB<K, V, M, N>*** references,
-    std::vector< std::vector<size_t> > const& permutation,
-    size_t start, size_t end,
-    signed_size_t maximumSubmitDepth, signed_size_t depth) {
-
-    KdNodePDB<K, V, M, N>* node = nullptr;
-
-    // The partition permutes as x, y, z, w... and specifies the most significant key.
-    size_t p = permutation.at(depth).at(permutation.at(0).size() - 1);
-
-    // Obtain the reference array that corresponds to the most significant key.
-    KdNodePDB<K, V, M, N>** reference = references[permutation.at(depth).at(N)];
-
-    if (end == start) {
-
-      // Only one reference was passed to this function, so add it to the tree.
-      node = reference[end];
-
-    }
-    else if (end == start + 1) {
-
-      // Two references were passed to this function in sorted order, so store the start
-      // element at this level of the tree and store the end element as the > child.
-      node = reference[start];
-      node->gtChild = reference[end];
-
-    }
-    else if (end == start + 2) {
-
-      // Three references were passed to this function in sorted order, so
-      // store the median element at this level of the tree, store the start
-      // element as the < child and store the end element as the > child.
-      node = reference[start + 1];
-      node->ltChild = reference[start];
-      node->gtChild = reference[end];
-
-    }
-    else if (end > start + 2) {
-
-      // Four or more references were passed to this function, so the
-      // median element of the reference array is chosen as the tuple
-      // about which the other reference arrays will be partitioned
-      // Avoid overflow when computing the median.
-      size_t median = start + ((end - start) / 2);
-
-      // Store the median element of the reference array in a new KdNode.
-      node = reference[median];
-
-      // Build both branches with child threads at as many levels of the tree
-      // as possible.  Create the child threads as high in the tree as possible.
-      // Are child threads available to build both branches of the tree?
-      if (maximumSubmitDepth < 0 || depth > maximumSubmitDepth) {
-
-        // No, child threads are not available, so one thread will be used.
-        // Initialize startIndex=1 so that the 'for' loop that partitions the
-        // reference arrays will partition a number of arrays equal to N.
-        size_t startIndex = 1;
-
-        // If depth < N-1, copy references[permut[N]] to references[permut[0]]
-        // where permut is the permutation vector for this level of the tree.
-        // Sort the two halves of references[permut[0]] with p+1 as the most
-        // significant key of the super key. Use as the temporary array
-        // references[permut[1]] because that array is not used for partitioning.
-        // Partition a number of reference arrays equal to the tree depth because
-        // those reference arrays are already sorted.
-        if (depth < N - 1) {
-          startIndex = N - depth;
-          KdNodePDB<K, V, M, N>** dst = references[permutation.at(depth).at(0)];
-           for (size_t i = start; i <= end; ++i) {
-            dst[i] = reference[i];
-          }
-          // Sort the lower half of references[permut[0]] with the current thread.
-          size_t numThreads = 1;
-          size_t pp1 = p + 1;
-          if ((maximumSubmitDepth - depth) > 0) numThreads = (1LL << (maximumSubmitDepth - depth));
-          parallelSort(dst + start, dst + median, [&](KdNodePDB<K, V, M, N>* a, KdNodePDB<K, V, M, N>* b) {
-            return 0 > superKeyCompare(a->tuple, b->tuple, pp1);
-            }, numThreads);
-
-          // Sort the upper half of references[permut[0]] with the current thread.
-          parallelSort(dst + median + 1, dst + end + 1, [&](KdNodePDB<K, V, M, N>* a, KdNodePDB<K, V, M, N>* b) {
-            return 0 > superKeyCompare(a->tuple, b->tuple, pp1);
-            }, numThreads);
+    /*
+      * The removeDuplicates function checks the validity of the merge sort and
+      * removes duplicates from the kdNodes array.
+      *
+      * Calling parameters:
+      *
+      * kdNodes - a KdNode** array that has been sorted via merge sort according to (x,y,z,w...) tuples
+      * i - the leading dimension for the super key
+      *
+      * returns the end index of the reference array following removal of duplicate elements
+      */
+  private:
+    inline
+      static size_t removeDuplicates(KdNodePDB** kdNodes, size_t i, size_t size) {
+      size_t end = 0;
+      for (size_t j = 1; j < size; ++j) {
+        K compare = superKeyCompare(kdNodes[j]->tuple, kdNodes[end]->tuple, i);
+        if (compare < 0) {
+          std::cout << "merge sort failure: superKeyCompare(kdNodes[" << j << "], kdNodes["
+            << end << "], " << i << ") = " << compare << std::endl;
+          exit(1);
         }
-
-        // Partition the reference arrays specified by 'startIndex' in
-        // a priori sorted order by comparing super keys.  Store the
-        // result from references[permut[i]]] in references[permut[i-1]]
-        // where permut is the permutation vector for this level of the
-        // tree, thus permuting the reference arrays. Skip the element
-        // of references[permut[i]] that equals the tuple that is stored
-        // in the new KdNode.
-        K* tuple = node->tuple;
-        for (size_t i = startIndex; i < N; ++i) {
-          // Specify the source and destination reference arrays.
-          KdNodePDB<K, V, M, N>** src = references[permutation.at(depth).at(i)];
-          KdNodePDB<K, V, M, N>** dst = references[permutation.at(depth).at(i - 1)];
-
-          // Fill the lower and upper halves of one reference array
-          // in ascending order with the current thread.
-          for (size_t j = start, lower = start - 1, upper = median; j <= end; ++j) {
-            KdNodePDB<K, V, M, N>* src_j = src[j];
-            K compare = superKeyCompare(src_j->tuple, tuple, p);
-            if (compare < 0) {
-              dst[++lower] = src_j;
-            }
-            else if (compare > 0) {
-              dst[++upper] = src_j;
-            }
-          }
+        else if (compare > 0) {
+          // Keep the jth element of the kdNodes array.
+          kdNodes[++end] = kdNodes[j];
         }
+        else {
+          // append vales to the end of the kept kdNode and delete the now unused node
+          kdNodes[end]->values->splice(kdNodes[end]->values->end(), *kdNodes[j]->values);
+          delete kdNodes[j];
+        }
+      }
+      return end;
+    }
 
-        // Recursively build the < branch of the tree with the current thread.
-        node->ltChild = buildKdTree(references, permutation, start, median - 1,
-          maximumSubmitDepth, depth + 1);
+    /*
+      * The buildKdTree function builds a k-d tree by recursively partitioning
+      * the reference arrays and adding KdNodes to the tree.  These arrays
+      * are permuted cyclically for successive levels of the tree in
+      * order that sorting occur in the order x, y, z, w...
+      *
+      * Calling parameters:
+      *
+      * reference - a KdNode*** array to recursively sort via its (x, y, z, w...) tuples array
+      * temporary - a KdNode*** temporary array from which to copy sorted results;
+      * start - start element of the reference array
+      * end - end element of the reference array
+      * maximumSubmitDepth - the maximum tree depth at which a child task may be launched
+      * depth - the depth in the tree
+      *
+      * returns: a KdNode pointer to the root of the k-d tree
+      */
+  private:
+    static KdNodePDB* buildKdTree(KdNodePDB*** references,
+      std::vector< std::vector<size_t> > const& permutation,
+      size_t start, size_t end,
+      signed_size_t maximumSubmitDepth, signed_size_t depth) {
 
-        // Then recursively build the > branch of the tree with the current thread.
-        node->gtChild = buildKdTree(references, permutation, median + 1, end,
-          maximumSubmitDepth, depth + 1);
+      KdNodePDB* node = nullptr;
+
+      // The partition permutes as x, y, z, w... and specifies the most significant key.
+      size_t p = permutation.at(depth).at(permutation.at(0).size() - 1);
+
+      // Obtain the reference array that corresponds to the most significant key.
+      KdNodePDB** reference = references[permutation.at(depth).at(N)];
+
+      if (end == start) {
+
+        // Only one reference was passed to this function, so add it to the tree.
+        node = reference[end];
 
       }
-      else {
+      else if (end == start + 1) {
 
-        // Yes, child threads are available, so two threads will be used.
-        // Initialize endIndex=0 so that the 'for' loop that partitions the
-        // reference arrays will partition a number of arrays equal to N.
-        size_t startIndex = 1;
+        // Two references were passed to this function in sorted order, so store the start
+        // element at this level of the tree and store the end element as the > child.
+        node = reference[start];
+        node->gtChild = reference[end];
 
-        // If depth < N-1, copy references[permut[N]] to references[permut[0]]
-        // where permut is the permutation vector for this level of the tree.
-        // Sort the two halves of references[permut[0]] with p+1 as the most
-        // significant key of the super key. Use as the temporary array
-        // references[permut[1]] because that array is not used for partitioning.
-        // Partition a number of reference arrays equal to the tree depth because
-        // those reference arrays are already sorted.
-        if (depth < N - 1) {
-          startIndex = N - depth;
-          KdNodePDB<K, V, M, N>** dst = references[permutation.at(depth).at(0)];
-          // Copy and sort the lower half of references[permut[0]] with a child thread.
-          std::future<void> copyFuture =
-            std::async(std::launch::async, [&] {
-            for (size_t i = start; i <= median - 1L; ++i) {
+      }
+      else if (end == start + 2) {
+
+        // Three references were passed to this function in sorted order, so
+        // store the median element at this level of the tree, store the start
+        // element as the < child and store the end element as the > child.
+        node = reference[start + 1];
+        node->ltChild = reference[start];
+        node->gtChild = reference[end];
+
+      }
+      else if (end > start + 2) {
+
+        // Four or more references were passed to this function, so the
+        // median element of the reference array is chosen as the tuple
+        // about which the other reference arrays will be partitioned
+        // Avoid overflow when computing the median.
+        size_t median = start + ((end - start) / 2);
+
+        // Store the median element of the reference array in a new KdNode.
+        node = reference[median];
+
+        // Build both branches with child threads at as many levels of the tree
+        // as possible.  Create the child threads as high in the tree as possible.
+        // Are child threads available to build both branches of the tree?
+        if (maximumSubmitDepth < 0 || depth > maximumSubmitDepth) {
+
+          // No, child threads are not available, so one thread will be used.
+          // Initialize startIndex=1 so that the 'for' loop that partitions the
+          // reference arrays will partition a number of arrays equal to N.
+          size_t startIndex = 1;
+
+          // If depth < N-1, copy references[permute[N]] to references[permute[0]]
+          // where permute is the permutation vector for this level of the tree.
+          // Sort the two halves of references[permut[0]] with p+1 as the most
+          // significant key of the super key. Use as the temporary array
+          // references[permute[1]] because that array is not used for partitioning.
+          // Partition a number of reference arrays equal to the tree depth because
+          // those reference arrays are already sorted.
+          if (depth < N - 1) {
+            startIndex = N - depth;
+            KdNodePDB** dst = references[permutation.at(depth).at(0)];
+            for (size_t i = start; i <= end; ++i) {
               dst[i] = reference[i];
             }
+            // Sort the lower half of references[permute[0]] with the current thread.
             size_t numThreads = 1;
             size_t pp1 = p + 1;
-            if (maximumSubmitDepth > -1) numThreads = (1LL << (maximumSubmitDepth - depth + 1));
-            parallelSort(dst + start, dst + median, [&](KdNodePDB<K, V, M, N>* a, KdNodePDB<K, V, M, N>* b) {
+            if ((maximumSubmitDepth - depth) > 0) numThreads = (1LL << (maximumSubmitDepth - depth));
+            parallelSort(dst + start, dst + median, [&](KdNodePDB* a, KdNodePDB* b) {
               return 0 > superKeyCompare(a->tuple, b->tuple, pp1);
-              }, numThreads / 2);
-          });
+              }, numThreads);
 
-          // Copy and sort the upper half of references[permut[0]] with the current thread.
-          for (size_t i = median + 1; i <= end; ++i) {
-            dst[i] = reference[i];
+            // Sort the upper half of references[permute[0]] with the current thread.
+            parallelSort(dst + median + 1, dst + end + 1, [&](KdNodePDB* a, KdNodePDB* b) {
+              return 0 > superKeyCompare(a->tuple, b->tuple, pp1);
+              }, numThreads);
           }
-          int64_t numThreads = 1;
-          size_t pp1 = p + 1;
-          if (maximumSubmitDepth > -1) numThreads = (1LL << (maximumSubmitDepth - depth + 1));
-          parallelSort(dst + median + 1, dst + end + 1, [&](KdNodePDB<K, V, M, N>* a, KdNodePDB<K, V, M, N>* b) {
-            return 0 > superKeyCompare(a->tuple, b->tuple, pp1);
-            }, numThreads / 2);
 
-          // Wait for the child thread to finish execution.
-          try {
-            copyFuture.get();
-          }
-          catch (std::exception const& e) {
-            std::cout << "caught exception " << e.what() << std::endl;
-          }
-        }
+          // Partition the reference arrays specified by 'startIndex' in
+          // a priori sorted order by comparing super keys.  Store the
+          // result from references[permute[i]] in references[permute[i-1]]
+          // where permute is the permutation vector for this level of the
+          // tree, thus permuting the reference arrays. Skip the element
+          // of references[permute[i]] that equals the tuple that is stored
+          // in the new KdNode.
+          K* tuple = node->tuple;
+          for (size_t i = startIndex; i < N; ++i) {
+            // Specify the source and destination reference arrays.
+            KdNodePDB** src = references[permutation.at(depth).at(i)];
+            KdNodePDB** dst = references[permutation.at(depth).at(i - 1)];
 
-        // Create a copy of the node->tuple array so that the current thread
-        // and the child thread do not contend for read access to this array.
-        K* tuple = node->tuple;
-        K* point = new K[N];
-        for (size_t i = 0; i < N; ++i) {
-          point[i] = tuple[i];
-        }
-
-        // Partition the reference arrays specified by 'startIndex' in
-        // a priori sorted order by comparing super keys.  Store the
-        // result from references[permut[i]]] in references[permut[i-1]]
-        // where permut is the permutation vector for this level of the
-        // tree, thus permuting the reference arrays. Skip the element
-        // of references[permut[i]] that equals the tuple that is stored
-        // in the new KdNode.
-        for (size_t i = startIndex; i < N; ++i) {
-          // Specify the source and destination reference arrays.
-          KdNodePDB<K, V, M, N>** src = references[permutation.at(depth).at(i)];
-          KdNodePDB<K, V, M, N>** dst = references[permutation.at(depth).at(i - 1)];
-
-          // Two threads may be used to partition the reference arrays, analogous to
-          // the use of two threads to merge the results for the merge sort algorithm.
-          // Fill one reference array in ascending order with a child thread.
-          std::future<void> partitionFuture =
-            std::async(std::launch::async, [&] {
-            for (size_t lower = start - 1, upper = median, j = start; j <= median; ++j) {
-              KdNodePDB<K, V, M, N>* src_j = src[j];
-              K compare = superKeyCompare(src_j->tuple, point, p);
+            // Fill the lower and upper halves of one reference array
+            // in ascending order with the current thread.
+            for (size_t j = start, lower = start - 1, upper = median; j <= end; ++j) {
+              KdNodePDB* src_j = src[j];
+              K compare = superKeyCompare(src_j->tuple, tuple, p);
               if (compare < 0) {
                 dst[++lower] = src_j;
               }
@@ -390,312 +282,351 @@ private:
                 dst[++upper] = src_j;
               }
             }
-              });
+          }
 
-          // Simultaneously fill the same reference array in descending order with the current thread.
-          for (size_t lower = median, upper = end + 1, k = end; k > median; --k) {
-            KdNodePDB<K, V, M, N>* src_k = src[k];
-            K compare = superKeyCompare(src_k->tuple, tuple, p);
-            if (compare < 0) {
-              dst[--lower] = src_k;
+          // Recursively build the < branch of the tree with the current thread.
+          node->ltChild = buildKdTree(references, permutation, start, median - 1,
+            maximumSubmitDepth, depth + 1);
+
+          // Then recursively build the > branch of the tree with the current thread.
+          node->gtChild = buildKdTree(references, permutation, median + 1, end,
+            maximumSubmitDepth, depth + 1);
+
+        }
+        else {
+
+          // Yes, child threads are available, so two threads will be used.
+          // Initialize endIndex=0 so that the 'for' loop that partitions the
+          // reference arrays will partition a number of arrays equal to N.
+          size_t startIndex = 1;
+
+          // If depth < N-1, copy references[permute[N]] to references[permute[0]]
+          // where permute is the permutation vector for this level of the tree.
+          // Sort the two halves of references[permute[0]] with p+1 as the most
+          // significant key of the super key. Use as the temporary array
+          // references[permute[1]] because that array is not used for partitioning.
+          // Partition a number of reference arrays equal to the tree depth because
+          // those reference arrays are already sorted.
+          if (depth < N - 1) {
+            startIndex = N - depth;
+            KdNodePDB** dst = references[permutation.at(depth).at(0)];
+            // Copy and sort the lower half of references[permute[0]] with a child thread.
+            std::future<void> copyFuture =
+              std::async(std::launch::async, [&] {
+              for (size_t i = start; i <= median - 1L; ++i) {
+                dst[i] = reference[i];
+              }
+              size_t numThreads = 1;
+              size_t pp1 = p + 1;
+              if (maximumSubmitDepth > -1) numThreads = (1LL << (maximumSubmitDepth - depth + 1));
+              parallelSort(dst + start, dst + median, [&](KdNodePDB* a, KdNodePDB* b) {
+                return 0 > superKeyCompare(a->tuple, b->tuple, pp1);
+                }, numThreads / 2);
+                });
+
+            // Copy and sort the upper half of references[permute[0]] with the current thread.
+            for (size_t i = median + 1; i <= end; ++i) {
+              dst[i] = reference[i];
             }
-            else if (compare > 0) {
-              dst[--upper] = src_k;
+            int64_t numThreads = 1;
+            size_t pp1 = p + 1;
+            if (maximumSubmitDepth > -1) numThreads = (1LL << (maximumSubmitDepth - depth + 1));
+            parallelSort(dst + median + 1, dst + end + 1, [&](KdNodePDB* a, KdNodePDB* b) {
+              return 0 > superKeyCompare(a->tuple, b->tuple, pp1);
+              }, numThreads / 2);
+
+            // Wait for the child thread to finish execution.
+            try {
+              copyFuture.get();
+            }
+            catch (std::exception const& e) {
+              std::cout << "caught exception " << e.what() << std::endl;
             }
           }
 
+          // Create a copy of the node->tuple array so that the current thread
+          // and the child thread do not contend for read access to this array.
+          K* tuple = node->tuple;
+          K* point = new K[N];
+          for (size_t i = 0; i < N; ++i) {
+            point[i] = tuple[i];
+          }
+
+          // Partition the reference arrays specified by 'startIndex' in
+          // a priori sorted order by comparing super keys.  Store the
+          // result from references[permute[i]]] in references[permute[i-1]]
+          // where permute is the permutation vector for this level of the
+          // tree, thus permuting the reference arrays. Skip the element
+          // of references[permute[i]] that equals the tuple that is stored
+          // in the new KdNode.
+          for (size_t i = startIndex; i < N; ++i) {
+            // Specify the source and destination reference arrays.
+            KdNodePDB** src = references[permutation.at(depth).at(i)];
+            KdNodePDB** dst = references[permutation.at(depth).at(i - 1)];
+
+            // Two threads may be used to partition the reference arrays, analogous to
+            // the use of two threads to merge the results for the merge sort algorithm.
+            // Fill one reference array in ascending order with a child thread.
+            std::future<void> partitionFuture =
+              std::async(std::launch::async, [&] {
+              for (size_t lower = start - 1, upper = median, j = start; j <= median; ++j) {
+                KdNodePDB* src_j = src[j];
+                K compare = superKeyCompare(src_j->tuple, point, p);
+                if (compare < 0) {
+                  dst[++lower] = src_j;
+                }
+                else if (compare > 0) {
+                  dst[++upper] = src_j;
+                }
+              }
+                });
+
+            // Simultaneously fill the same reference array in descending order with the current thread.
+            for (size_t lower = median, upper = end + 1, k = end; k > median; --k) {
+              KdNodePDB* src_k = src[k];
+              K compare = superKeyCompare(src_k->tuple, tuple, p);
+              if (compare < 0) {
+                dst[--lower] = src_k;
+              }
+              else if (compare > 0) {
+                dst[--upper] = src_k;
+              }
+            }
+
+            // Wait for the child thread to finish execution.
+            try {
+              partitionFuture.get();
+            }
+            catch (std::exception const& e) {
+              std::cout << "caught exception " << e.what() << std::endl;
+            }
+          }
+
+          // Delete the point array.
+          delete[] point;
+
+          // Recursively build the < branch of the tree with a child thread.
+          // The recursive call to buildKdTree must be placed in a lambda
+          // expression because buildKdTree is a template not a function.
+          std::future<KdNodePDB*> buildFuture =
+            std::async(std::launch::async, [&] {
+            return buildKdTree(references, permutation, start, median - 1,
+              maximumSubmitDepth, depth + 1);
+              });
+
+          // And simultaneously build the > branch of the tree with the current thread.
+          node->gtChild = buildKdTree(references, permutation, median + 1, end,
+            maximumSubmitDepth, depth + 1);
+
           // Wait for the child thread to finish execution.
           try {
-            partitionFuture.get();
+            node->ltChild = buildFuture.get();
           }
           catch (std::exception const& e) {
             std::cout << "caught exception " << e.what() << std::endl;
           }
         }
 
-        // Delete the point array.
-        delete[] point;
+      }
+      else if (end < start) {
 
-        // Recursively build the < branch of the tree with a child thread.
-        // The recursive call to buildKdTree must be placed in a lambda
-        // expression because buildKdTree is a template not a function.
-        std::future<KdNodePDB<K, V, M, N>*> buildFuture =
-          std::async(std::launch::async, [&] {
-          return buildKdTree(references, permutation, start, median - 1,
-          maximumSubmitDepth, depth + 1);
-            });
+        // This is an illegal condition that should never occur, so test for it last.
+        std::cout << "error has occurred at depth = " << depth << " : end = " << end
+          << "  <  start = " << start << std::endl;
+        exit(1);
 
-        // And simultaneously build the > branch of the tree with the current thread.
-        node->gtChild = buildKdTree(references, permutation, median + 1, end,
-          maximumSubmitDepth, depth + 1);
-
-        // Wait for the child thread to finish execution.
-        try {
-          node->ltChild = buildFuture.get();
-        }
-        catch (std::exception const& e) {
-          std::cout << "caught exception " << e.what() << std::endl;
-        }
       }
 
-    }
-    else if (end < start) {
-
-      // This is an illegal condition that should never occur, so test for it last.
-      std::cout << "error has occurred at depth = " << depth << " : end = " << end
-        << "  <  start = " << start << std::endl;
-      exit(1);
-
+      // Return the pointer to the root of the k-d tree.
+      return node;
     }
 
-    // Return the pointer to the root of the k-d tree.
-    return node;
-  }
 
     /*
-     * The verifyKdTree function walks the k-d tree and checks that the
-     * children of a node are in the correct branch of that node.
+      * The swap function swaps two elements in a vector<size_t>.
+      *
+      * Calling parameters:
+      *
+      * a - the vector
+      * i - the index of the first element
+      * j - the index of the second element
+      */
+  private:
+    inline
+      static void swap(std::vector<size_t>& a, size_t i, size_t j) {
+      size_t t = a.at(i);
+      a.at(i) = a.at(j);
+      a.at(j) = t;
+    }
+
+    /*
+      * The createKdTree function performs the necessary initialization then calls the buildKdTree function.
+      *
+      * Calling parameters:
+      *
+      * kdNodes - a vector<KdNode*> wherein each KdNode contains a (x,y,z,w...) tuple
+      * numDimensions - the number of dimensions
+      * numThreads - the number of threads
+      * maximumSubmitDepth - the maximum tree depth at which a child task may be launched
+      *
+      * returns: a KdNode pointer to the root of the k-d tree
+      */
+  public:
+    static KdNodePDB* createKdTree(std::vector<KdNodePDB*>& kdNodes,
+      size_t numThreads, signed_size_t maximumSubmitDepth) {
+
+      // Create the references arrays including one additional array for use in building the k-d tree.
+      KdNodePDB*** references = new KdNodePDB * *[N + 1];
+
+      // The first references array is the .data() array of the kdNodes vector.
+      references[0] = kdNodes.data();
+
+      // Allocate the remaining references arrays.
+      for (size_t i = 1; i < N + 1; ++i) {
+        references[i] = new KdNodePDB * [kdNodes.size()];
+      }
+
+      // Sort the first reference array using multiple threads. Importantly,
+      // for compatibility with the 'permutation' vector initialized below,
+      // use the first dimension (0) as the leading key of the super key.
+      size_t numSortThreads = 1;
+      if (maximumSubmitDepth >= 0) numSortThreads = (1ULL << (maximumSubmitDepth + 1));
+      parallelSort(references[0], references[0] + kdNodes.size(),
+        [&](KdNodePDB* a, KdNodePDB* b) {
+          return (0 > superKeyCompare(a->tuple, b->tuple, 0));
+        }, numSortThreads);
+
+      // Remove references to duplicate coordinates via one pass through the first reference array.
+      size_t end = removeDuplicates(references[0], 0, kdNodes.size());
+
+
+      // Determine the maximum depth of the k-d tree, which is log2( kdNodes.size() ).
+      size_t size = kdNodes.size();
+      size_t maxDepth = 1;
+      while (size > 0) {
+        ++maxDepth;
+        size >>= 1;
+      }
+
+      // It is unnecessary to compute either the permutation of the reference array or
+      // the partition coordinate upon each recursive call of the buildKdTree function
+      // because both depend only on the depth of recursion, so they may be pre-computed.
+      // Create and initialize an 'indices' vector for the permutation calculation.
+      // Because this vector is initialized with 0, 1, 2, 3, 0, 1, 2, 3, etc. (for
+      // e.g. 4-dimensional data), the leading key of the super key will be 0 at the
+      // first level of the nascent tree, consistent with having sorted the reference
+      // array above using 0 as the leading key of the super key.
+      std::vector<size_t> indices(N + 2);
+      for (size_t i = 0; i < indices.size() - 1; ++i) {
+        indices[i] = i;
+      }
+
+      // Create a 'permutation' vector from the 'indices' vector to specify permutation
+      // of the reference arrays and of the partition coordinate.
+      std::vector< std::vector<size_t> > permutation(maxDepth, std::vector<size_t>(N + 2));
+
+      // Fill the permutation vector by calculating the permutation of the indices vector
+      // and the the partition coordinate of the tuple at each depth in the tree.
+      for (size_t i = 0; i < permutation.size(); ++i) {
+        // The last entry of the indices vector contains the partition coordinate.
+        indices.at(N + 1) = i % N;
+        // Swap the first and second to the last elements of the indices vector.
+        swap(indices, 0, N);
+        // Copy the indices vector to one row of the permutation vector.
+        permutation.at(i) = indices;
+        // Swap the third and second to the last elements of the indices vector.
+        swap(indices, N - 1, N);
+      }
+
+      // Build the k-d tree with multiple threads if possible.
+      KdNodePDB* root = buildKdTree(references, permutation, 0, end,
+        maximumSubmitDepth, 0);
+      // Delete all but the first of the references arrays.
+      for (size_t i = 1; i < N + 1; ++i) {
+        delete[] references[i];
+      }
+      delete[] references;
+
+      // Return the pointer to the root of the k-d tree.
+      return root;
+    }
+
+    /*
+      * Walk the k-d tree to delete each KdNode.
+      */
+  public:
+    void deleteKdTree() {
+
+      // Delete the < sub-tree.
+      if (ltChild != nullptr) {
+        ltChild->deleteKdTree();
+      }
+      // Delete the > sub-tree.
+      if (gtChild != nullptr) {
+        gtChild->deleteKdTree();
+      }
+      // Delete the current KdNode.
+      delete this;
+    }
+
+    /*
+      * The insideBounds function determines whether KdNode::tuple lies inside the
+      * hyper-rectangle defined by the query lower and upper bound vectors.
+      *
+      * Calling parameters:
+      *
+      * queryLower - the query lower bound vector
+      * queryUpper - the query upper bound vector
+      * enable - a vector that specifies the dimensions on which to test for insidedness
+      *
+      * return true if inside, false if outside
+      */
+  private:
+    bool insideBounds(std::vector<K> const& queryLower, std::vector<K> const& queryUpper,
+      std::vector<bool> const& enable) {
+      bool inside = true;
+      for (size_t i = 0; i < queryLower.size(); ++i) {
+        if (enable[i] && (queryLower[i] > tuple[i] || queryUpper[i] < tuple[i])) {
+          inside = false;
+          break;
+        }
+      }
+      return inside;
+    }
+
+// The following two macros are used as pairs to protect critical code from
+// being accessed at the same time by different thread.  These macros 
+// allow diffent means of preforming that lock to be experimented with.
+#define LOCK_THIS_BLOCK thisMutex.lock()
+#define UNLOCK_THIS_BLOCK thisMutex.unlock() 
+
+    /*
+     * The checkAllTakenStatus function checks the all taken status of this
+     * node for the moveToID.
      *
      * Calling parameters:
      *
-     * maximumSubmitDepth - the maximum tree depth at which a child task may be launched
-     * depth - the depth in the k-d tree
+     * moveToID - the ID of the container currently being processed.
      *
-     * returns: a count of the number of kdNodes in the k-d tree
+     * return - a SearchReturn enum indicating whether all the nodes 
+     *          in the tree below have already been taken by this cluster.
      */
-private:
-  size_t verifyKdTree(signed_size_t maximumSubmitDepth, signed_size_t depth) {
 
-    size_t count = 1;
-
-    // The partition cycles as x, y, z, w...
-    size_t p = depth % N;
-
-    if (ltChild != nullptr) {
-      if (ltChild->tuple[p] > tuple[p]) {
-        std::cout << "child is > node!" << std::endl;
-        exit(1);
-      }
-      if (superKeyCompare(ltChild->tuple, tuple, p) >= 0) {
-        std::cout << "child is >= node!" << std::endl;
-        exit(1);
-      }
-    }
-    if (gtChild != nullptr) {
-      if (gtChild->tuple[p] < tuple[p]) {
-        std::cout << "child is < node!" << std::endl;
-        exit(1);
-      }
-      if (superKeyCompare(gtChild->tuple, tuple, p) <= 0) {
-        std::cout << "child is <= node" << std::endl;
-        exit(1);
-      }
-    }
-
-    // Verify the < branch with a child thread at as many levels of the tree as possible.
-    // Create the child thread as high in the tree as possible for greater utilization.
-
-    // Is a child thread available to build the < branch?
-    if (maximumSubmitDepth < 0 || depth > maximumSubmitDepth) {
-
-      // No, so verify the < branch with the current thread.
-      if (ltChild != nullptr) {
-        count += ltChild->verifyKdTree(maximumSubmitDepth, depth + 1);
-      }
-
-      // Then verify the > branch with the current thread.
-      if (gtChild != nullptr) {
-        count += gtChild->verifyKdTree(maximumSubmitDepth, depth + 1);
-      }
-    }
-    else {
-
-      // Yes, so verify the < branch with a child thread. Note that a
-      // lambda is required to instantiate the verifyKdTree template.
-      std::future<size_t> verifyFuture;
-      if (ltChild != nullptr) {
-        verifyFuture =
-          std::async(std::launch::async, [&] {
-          return ltChild->verifyKdTree(maximumSubmitDepth, depth + 1);
-            });
-      }
-
-      // And simultaneously verify the > branch with the current thread.
-      size_t gtCount = 0;
-      if (gtChild != nullptr) {
-        gtCount = gtChild->verifyKdTree(maximumSubmitDepth, depth + 1);
-      }
-
-      // Wait for the child thread to finish execution.
-      size_t ltCount = 0;
-      if (ltChild != nullptr) {
-        try {
-          ltCount = verifyFuture.get();
+  private:
+    inline SearchRet checkAllTakenStatus(const uint32_t moveToID) {
+      // figure out if there is any need to proceed further
+      if (allTakenSet.size() > 0) {
+        LOCK_THIS_BLOCK;
+        if (allTakenSet.contains(moveToID)) {
+          UNLOCK_THIS_BLOCK;
+          return AllTakenByID;
         }
-        catch (std::exception const& e) {
-          std::cout << "caught exception " << e.what() << std::endl;
-        }
+        UNLOCK_THIS_BLOCK;
+        return AllTaken;
       }
-      count += ltCount + gtCount;
+      return NoResult;
     }
 
-    return count;
-  }
-
-  /*
-    * The swap function swaps two elements in a vector<size_t>.
-    *
-    * Calling parameters:
-    *
-    * a - the vector
-    * i - the index of the first element
-    * j - the index of the second element
-    */
-private:
-  inline
-    static void swap(std::vector<size_t>& a, size_t i, size_t j) {
-    size_t t = a.at(i);
-    a.at(i) = a.at(j);
-    a.at(j) = t;
-  }
-
-  /*
-    * The createKdTree function performs the necessary initialization then calls the buildKdTree function.
-    *
-    * Calling parameters:
-    *
-    * kdNodes - a vector<KdNode*> wherein each KdNode contains a (x,y,z,w...) tuple
-    * numDimensions - the number of dimensions
-    * numThreads - the number of threads
-    * maximumSubmitDepth - the maximum tree depth at which a child task may be launched
-    *
-    * returns: a KdNode pointer to the root of the k-d tree
-    */
-public:
-  static KdNodePDB<K, V, M, N>* createKdTree(std::vector<KdNodePDB<K, V, M, N>*>& kdNodes,
-    size_t numThreads, signed_size_t maximumSubmitDepth) {
-
-    // Create the references arrays including one additional array for use in building the k-d tree.
-    KdNodePDB<K, V, M, N>*** references = new KdNodePDB<K, V, M, N>** [N + 1];
-
-    // The first references array is the .data() array of the kdNodes vector.
-    references[0] = kdNodes.data();
-
-    // Allocate the remaining references arrays.
-    for (size_t i = 1; i < N + 1; ++i) {
-      references[i] = new KdNodePDB<K, V, M, N>* [kdNodes.size()];
-    }
-
-    // Sort the first reference array using multiple threads. Importantly,
-    // for compatibility with the 'permutation' vector initialized below,
-    // use the first dimension (0) as the leading key of the super key.
-    int numthreads = 1;
-    if (maximumSubmitDepth >= 0) numthreads = (1 << (maximumSubmitDepth + 1));
-    parallelSort(references[0], references[0] + kdNodes.size(),
-      [&](KdNodePDB<K, V, M, N>* a, KdNodePDB<K, V, M, N>* b) {
-        return (0 > superKeyCompare(a->tuple, b->tuple, 0));
-      }, numthreads);
-
-    // Remove references to duplicate coordinates via one pass through the first reference array.
-    size_t end = removeDuplicates(references[0], 0, kdNodes.size());
-
-
-    // Determine the maximum depth of the k-d tree, which is log2( kdNodes.size() ).
-    size_t size = kdNodes.size();
-    size_t maxDepth = 1;
-    while (size > 0) {
-      ++maxDepth;
-      size >>= 1;
-    }
-
-    // It is unnecessary to compute either the permutation of the reference array or
-    // the partition coordinate upon each recursive call of the buildKdTree function
-    // because both depend only on the depth of recursion, so they may be pre-computed.
-    // Create and initialize an 'indices' vector for the permutation calculation.
-    // Because this vector is initialized with 0, 1, 2, 3, 0, 1, 2, 3, etc. (for
-    // e.g. 4-dimensional data), the leading key of the super key will be 0 at the
-    // first level of the nascent tree, consistent with having sorted the reference
-    // array above using 0 as the leading key of the super key.
-    std::vector<size_t> indices(N + 2);
-    for (size_t i = 0; i < indices.size() - 1; ++i) {
-      indices[i] = i;
-    }
-
-    // Create a 'permutation' vector from the 'indices' vector to specify permutation
-    // of the reference arrays and of the partition coordinate.
-    std::vector< std::vector<size_t> > permutation(maxDepth, std::vector<size_t>(N + 2));
-
-    // Fill the permutation vector by calculating the permutation of the indices vector
-    // and the the partition coordinate of the tuple at each depth in the tree.
-    for (size_t i = 0; i < permutation.size(); ++i) {
-      // The last entry of the indices vector contains the partition coordinate.
-      indices.at(N + 1) = i % N;
-      // Swap the first and second to the last elements of the indices vector.
-      swap(indices, 0, N);
-      // Copy the indices vector to one row of the permutation vector.
-      permutation.at(i) = indices;
-      // Swap the third and second to the last elements of the indices vector.
-      swap(indices, N - 1, N);
-    }
-
-    // Build the k-d tree with multiple threads if possible.
-    KdNodePDB<K, V, M, N>* root = buildKdTree(references, permutation, 0, end,
-      maximumSubmitDepth, 0);
-    // Verify the k-d tree and report the number of kdNodes.
-    size_t numberOfNodes;
-    numberOfNodes = root->verifyKdTree(maximumSubmitDepth, 0);
-    // Delete all but the first of the references arrays.
-    for (size_t i = 1; i < N + 1; ++i) {
-      delete[] references[i];
-    }
-    delete[] references;
-
-    // Return the pointer to the root of the k-d tree.
-    return root;
-  }
-
-  /*
-    * Walk the k-d tree to delete each KdNode.
-    */
-public:
-  void deleteKdTree() {
-
-    // Delete the < sub-tree.
-    if (ltChild != nullptr) {
-      ltChild->deleteKdTree();
-    }
-    // Delete the > sub-tree.
-    if (gtChild != nullptr) {
-      gtChild->deleteKdTree();
-    }
-    // Delete the current KdNode.
-    delete this;
-  }
-
-  /*
-    * The insideBounds function determines whether KdNode::tuple lies inside the
-    * hyper-rectangle defined by the query lower and upper bound vectors.
-    *
-    * Calling parameters:
-    *
-    * queryLower - the query lower bound vector
-    * queryUpper - the query upper bound vector
-    * enable - a vector that specifies the dimensions on which to test for insidedness
-    *
-    * return true if inside, false if outside
-    */
-private:
-  bool insideBounds(std::vector<K> const& queryLower, std::vector<K> const& queryUpper,
-    std::vector<bool> const& enable) {
-    bool inside = true;
-    for (size_t i = 0; i < queryLower.size(); ++i) {
-      if (enable[i] && (queryLower[i] > tuple[i] || queryUpper[i] < tuple[i])) {
-        inside = false;
-        break;
-      }
-    }
-    return inside;
-  }
 
     /*
      * The regionSearch function searches the k-d tree to find the KdNodes that
@@ -711,281 +642,256 @@ private:
      * maximumSubmitDepth - the maximum tree depth at which a child task may be launched
      * depth - the depth in the k-d tree
      *
-     * return - a SearchReturn enum indicating whether all the nodes in the tree below have already been taken by this cluster.
+     * return - a SearchReturn enum indicating whether all the nodes in the tree below have
+     *          already been taken by this cluster.
      */
-public:
-  SearchRet regionSearchAndRemove(std::list<retPair_t*>& result,
-    const std::vector<K>& queryLower, const std::vector<K>& queryUpper,
-    M* const moveTo, const signed_size_t depth, const std::vector<int64_t>& permutation) {
-    
-    // get a local copy of the cluster ID;
-    const uint32_t& moveToID = moveTo->getID();
+  public:
+    SearchRet regionSearchAndRemove(std::list<retPair_t*>& result,
+      const std::vector<K>& queryLower, const std::vector<K>& queryUpper,
+      M* const moveTo, const signed_size_t depth, const std::vector<int64_t>& permutation) {
 
-    // Look up the primary coordinate index.
-    unsigned int p = (unsigned int)permutation[(unsigned int)depth];
+      // get a local copy of the cluster ID;
+      const uint32_t moveToID = moveTo->getID();
 
-    // the branchCode will be used later to select the actual branch configuration in the switch statement
-    // below.  0 = no branch, 1 = < branch only, 2 = > branch only, 3 = both branches.
-    int branchCode = 0;
-    // the return codes indicate whether the status of the node that was just returned from
-    // init the return result to NoResult
-    SearchRet ltRetCode = NoResult;
-    SearchRet gtRetCode = NoResult;
-    SearchRet returnResult = AllTakenByID;
+      // figure out if there is any need to proceed further in this node
+      // if all nodes below have already been taken by this container, just return with the 
+      // proper code.
+      if (allTakenSet.size() > 0) {
+        LOCK_THIS_BLOCK;
+        if (allTakenSet.contains(moveToID)) {
+          UNLOCK_THIS_BLOCK;
+          return AllTakenByID;
+        }
+        UNLOCK_THIS_BLOCK;
+      }
 
-    // Search the < branch of the k-d tree if the partition coordinate of the queryPlus is
-    // <= the partition coordinate of the k-d node.  The < branch
-    // must be searched when the cutoff distance equals the partition coordinate because the super
-    // key may assign a point to either branch of the tree if the sorting or partition coordinate,
-    // which forms the most significant portion of the super key, shows equality.
-    if (queryLower[p] <= tuple[p]) {
-      // but only search if the ltChild pointer is not null and all nodes below are not taken for this container
-      if (ltChild != nullptr && (ltAllTaken != moveToID)) branchCode = 1;
-      // Search the > branch of the k-d tree if the partition coordinate of the queryPlus is
-      // >= the partition coordinate of the k-d node.  The < branch
+      // Look up the primary coordinate index.
+      unsigned int p = (unsigned int)permutation[(unsigned int)depth];
+
+      // These return codes indicate whether the status of the node that was just returned from
+      // init the return result to NoResult
+      SearchRet ltRetCode = NoResult;
+      SearchRet gtRetCode = NoResult;
+      bool inside = false;
+
+      // Search the < branch of the k-d tree if the partition coordinate of the queryPlus is
+      // <= the partition coordinate of the k-d node.  The < branch
       // must be searched when the cutoff distance equals the partition coordinate because the super
       // key may assign a point to either branch of the tree if the sorting or partition coordinate,
       // which forms the most significant portion of the super key, shows equality.
-      if (queryUpper[p] >= tuple[p]) {
-        // but only search if the gtChild pointer is not null and all nodes below are not taken for this container
-        if (gtChild != nullptr && (gtAllTaken != moveToID)) branchCode += 2;
-        // while here check to see if the local tuple is inside the the hypercube.
-        // If the distance from the query node to the k-d node is within the query rectangle
-        // in all k dimensions, add the k-d node to a list.
-        bool inside = true;
-        for (size_t i = 0; i < queryUpper.size(); i++) {
-          if ((queryUpper[i] < tuple[i]) || (queryLower[i] > tuple[i])) {
-            inside = false;
-            break;
-          }
-        }
-        if (inside) {
-          // grab a lock on this node
-          std::lock_guard<std::mutex> guard(thisMutex);
-          // check if the node had not already been taken 
-          if (values != nullptr) {
-            // if it has not, add this nodes data to the return list and mark the node as taken
-            retPair_t* tmpPair = new retPair_t(tuple, values);
-            result.push_back(tmpPair);
-            movedTo = moveTo;  // mark the value as taken by another container.
-            values = nullptr;   // mark the node dead by nulling the pointer
-            returnResult = ResultFoundAndTaken;
-          } else if (moveTo != movedTo) {
-            // else indicate this cluster overlaps another cluster
-            if (moveTo->overlaps == nullptr) {
-              moveTo->overlaps = new std::set<M*>;
+      if (queryLower[p] <= tuple[p]) {
+        // but only search if the ltChild pointer is not null 
+        if (ltChild != nullptr)
+          ltRetCode = ltChild->regionSearchAndRemove(result, queryLower, queryUpper, moveTo, depth + 1, permutation);
+        else
+          ltRetCode = AllTakenByID;
+        // Search the > branch of the k-d tree if the partition coordinate of the queryPlus is
+        // >= the partition coordinate of the k-d node.  The < branch
+        // must be searched when the cutoff distance equals the partition coordinate because the super
+        // key may assign a point to either branch of the tree if the sorting or partition coordinate,
+        // which forms the most significant portion of the super key, shows equality.
+        if (queryUpper[p] >= tuple[p]) {
+          // Only search if the gtChild pointer is not null.  Otherwise report the return code as all taken.
+          if (gtChild != nullptr)
+            gtRetCode = gtChild->regionSearchAndRemove(result, queryLower, queryUpper, moveTo, depth + 1, permutation);
+          else
+            gtRetCode = AllTakenByID;
+          // Now check to see if the local tuple is inside the the hypercube.
+          // the test to down both children is a necessary but not sufficient indication of being inside.
+          // If the distance from the query node to the k-d node is within the query rectangle
+          // in all k dimensions, add the tuple and values to the return list.
+          inside = true;
+          for (size_t i = 0; i < queryUpper.size(); i++) {
+            if ((queryUpper[i] < tuple[i]) || (queryLower[i] > tuple[i])) {
+              inside = false;
+              break;
             }
-            
-            auto rslt = moveTo->overlaps->insert(movedTo);
+          }
+          if (inside) {
+            // check if we need to grab a lock on this node
+            LOCK_THIS_BLOCK;
+            // check if the node had not already been taken after we have the lock
+            if (values != nullptr) {
+              // if it has not, add this nodes data to the return list and mark the node as taken
+              retPair_t* tmpPair = new retPair_t(tuple, values);
+              result.push_back(tmpPair);
+              movedTo = moveTo;  // mark the value as taken by another container.
+              values = nullptr;   // mark the node dead by nulling the pointer
+            }
+            else if (moveTo != movedTo) {
+              // if this node was taken by another cluster, indicate this cluster overlaps that cluster
+              // by adding it to the overlaps set.
+              if (moveTo->overlaps == nullptr) {
+                moveTo->overlaps = new avlSet<M*>;
+              }
+              auto rslt = moveTo->overlaps->insert(movedTo);
 #ifdef DEBUG_PRINT
-            static std::mutex printMutex;
-            if (rslt.second == true) {
-              std::lock_guard<std::mutex> guard(printMutex);
-              std::cout << "cluster " << moveToID << " overlaps with cluster " << movedTo->getID() << "\n";
+              static std::mutex printMutex;
+              if (rslt.second == true) {
+                std::lock_guard<std::mutex> guard(printMutex);
+                std::cout << "cluster " << moveToID << " overlaps with cluster " << movedTo->getID() << "\n";
+              }
+#endif //DEBUG_PRINT
             }
-#endif
-            returnResult = NoResult;
-            // since an overlap was identified, there is no reason to continue searching the child branches if
-            // the overlapped cluster ID = the AllTaken IDs.
-            if (movedTo->getID() == ltAllTaken) branchCode &= 0x2;
-            if (movedTo->getID() == gtAllTaken) branchCode &= 0x1;
+            UNLOCK_THIS_BLOCK;
           }
         }
-        
+        // since we did not go down the gtChild path, that that nodes taken status.
+        if (gtChild != nullptr)
+          gtRetCode = gtChild->checkAllTakenStatus(moveToID);
+        else
+          gtRetCode = AllTakenByID;
       }
-    }
-    else { // will not descend the lt branch so lets check the gt.
-      if (queryUpper[p] >= tuple[p]) {
-        // but only search if the gtChild pointer is not null and all nodes below are not taken for this container
-        if (gtChild != nullptr && (gtAllTaken != moveToID)) branchCode = 2;
+      else { // Since we did not go down either child nodes, get their taken status.
+        if (queryUpper[p] >= tuple[p]) {
+          // but only search if the gtChild pointer is not null and all nodes below are not taken for this container
+          if (gtChild != nullptr)
+            gtRetCode = gtChild->regionSearchAndRemove(result, queryLower, queryUpper, moveTo, depth + 1, permutation);
+          else
+            gtRetCode = AllTakenByID;
+          if (ltChild != nullptr)
+            ltRetCode = ltChild->checkAllTakenStatus(moveToID);
+          else
+            ltRetCode = AllTakenByID;
+        }
       }
+
+      // now figure out what to record in the allTakenSet and what code to return
+      // this first condition covers the case where the current and all nodes below are have been taken by the same ID. 
+      if (movedTo == moveTo && ltRetCode == AllTakenByID && gtRetCode == AllTakenByID) {
+        LOCK_THIS_BLOCK;
+        allTakenSet.insert(moveToID);
+        UNLOCK_THIS_BLOCK;
+        return AllTakenByID;
+      }
+      // this second condition covers the case where all the nodes below have been have been or would have been taken by this ID.
+      if (inside && ltRetCode == AllTakenByID && gtRetCode == AllTakenByID) {
+        LOCK_THIS_BLOCK;
+        allTakenSet.insert(moveToID);
+        UNLOCK_THIS_BLOCK;
+        return AllTakenByID;
+      }
+      // this case handles the condition where all this node and the children have been taken by something but not all the same ID. 
+      if (movedTo != nullptr && ltRetCode != NoResult && gtRetCode != NoResult) {
+        LOCK_THIS_BLOCK;
+        allTakenSet.insert(allTakenID);
+        UNLOCK_THIS_BLOCK;
+        return AllTaken;
+      }
+      // if none of the above return nothing to change.
+      return NoResult;
     }
 
-    // now implement the branching decided on earlier
-    switch (branchCode) {
-    case 0: // child pointer are both null so just return
-      break;
-    case 1: // only go down the less than branch
-      ltRetCode = ltChild->regionSearchAndRemove(result, queryLower, queryUpper, moveTo, depth + 1, permutation);
-      if (ltRetCode == AllTakenByID || ltRetCode == ResultFoundAndTakenByID) {
-        ltAllTaken = moveToID;
-      }
-      else if (ltRetCode == AllTaken || ltRetCode == ResultFoundAndTaken) {
-        ltAllTaken = allTakenID;
-      }
-      break;
-    case 2: // only go down the greater than branch
-      gtRetCode = gtChild->regionSearchAndRemove(result, queryLower, queryUpper, moveTo, depth + 1, permutation);
-      if (gtRetCode == AllTakenByID || gtRetCode == ResultFoundAndTakenByID) {
-        gtAllTaken = moveToID;
-      }
-      else if (gtRetCode == AllTaken || gtRetCode == ResultFoundAndTaken) {
-        gtAllTaken = allTakenID;
-      }
-      break;
-    case 3: // go down both branches
-      ltRetCode = ltChild->regionSearchAndRemove(result, queryLower, queryUpper, moveTo, depth + 1, permutation);
-      if (ltRetCode == AllTakenByID || ltRetCode == ResultFoundAndTakenByID) {
-        ltAllTaken = moveToID;
-      }
-      else if (ltRetCode == AllTaken || ltRetCode == ResultFoundAndTaken) {
-        ltAllTaken = allTakenID;
-      }
-      gtRetCode = gtChild->regionSearchAndRemove(result, queryLower, queryUpper, moveTo, depth + 1, permutation);
-      if (gtRetCode == AllTakenByID || gtRetCode == ResultFoundAndTakenByID) {
-        gtAllTaken = moveToID;
-      }
-      else if (gtRetCode == AllTaken || gtRetCode == ResultFoundAndTaken) {
-        gtAllTaken = allTakenID;
-      }
-      break;
-    }
-
-    // Now figure out what to return.
-    // If the returnResult indicates 
-    if (returnResult == ResultFoundAndTaken || returnResult == ResultFoundAndTakenByID) {
-      if (movedTo == moveTo && (ltAllTaken == moveToID || ltChild == nullptr) && (gtAllTaken == moveToID || gtChild == nullptr))
-        returnResult = ResultFoundAndTakenByID;
-      else if (movedTo != nullptr && (ltAllTaken != 0 || ltChild == nullptr) && (gtAllTaken != 0 || gtChild == nullptr))
-        returnResult = ResultFoundAndTaken;
-      else returnResult = ResultFound;
-    }
-    else if (returnResult == AllTaken || returnResult == AllTakenByID) {
-      if (movedTo == moveTo && (ltAllTaken == moveToID || ltChild == nullptr) && (gtAllTaken == moveToID || gtChild == nullptr))
-        returnResult = AllTakenByID;
-      else if (movedTo != nullptr && (ltAllTaken != 0 || ltChild == nullptr) && (gtAllTaken != 0 || gtChild == nullptr))
-        returnResult = AllTaken;
-      else returnResult = NoResult;
-    }
-    return returnResult;
-  }
-
-  /**
-  The pickValue picks a value from the kdTree by descending the tree until it finds
-  a knNode where both child pointers are null and returns that value
+    /*
+  The pickValue picks a value from the kdTree by descending to the lowest point in the tree that it finds
+  a node where a value has not been taken yet.
   Parameters:
-    returnKV:   reference to a retPair where to place the value.
+    returnKV:   reference to a retPair where to place the tuple and value.
     selector:   unsigned in where the bits are used to guide which child node to descend
-    removePick: bool where if true will cause the value to be removed
     moveTo:     pointer to some object that will hold the value found
     depth:      integer counting the number of levels descended.
 
-    return:     SearchRet enum indicating whether this node and all of the nodes below have been taken
+     return - a SearchReturn enum indicating whether all the nodes in the tree below have
+              already been taken by this cluster.
 
   **/
 
-public:
-  SearchRet pickValue(retPair_t& returnKV,
-    const uint64_t selector, M* const moveTo, const bool removePick, const int depth) {
+  public:
+    SearchRet pickValue(retPair_t& returnKV, const uint64_t selector, M* const moveTo, const int depth) {
 
-    const uint32_t& moveToID = moveTo->getID();
+      // get a local copy of the container ID
+      const uint32_t& moveToID = moveTo->getID();
 
-    // init the return result to AllTaken
-    SearchRet returnResult = AllTaken;
-
-    // set the preferred recursion direction for this level fro the selector
-    bool goGtThan = (selector & 0x1) == 1;
-
-    // If preferred is lt or the preferred is gt but that path is blocked, 
-    // continue the search on the appropriate the lt child
-    if ((!goGtThan || gtAllTaken != 0 || gtChild == nullptr) && (ltAllTaken == 0 && ltChild != nullptr)) {
-      returnResult = ltChild->pickValue(returnKV, selector >> 1, moveTo, removePick, depth + 1);
-      // if the node below declared itself allTaken, set the gtAllTaken flag
-      if (removePick && (returnResult == ResultFoundAndTakenByID)) {
-        ltAllTaken = moveToID;
+      // figure out if there is any need to proceed further down the tree.
+      // if this nodes all taken set has any values it in, no further search is required.
+      if (allTakenSet.size() > 0) {
+        return AllTaken;
       }
-      else if (removePick && (returnResult == ResultFoundAndTaken)) {
-        ltAllTaken = allTakenID;
-      }
-      // else if no result was found, try the gt path
-      else if ((returnResult == AllTakenByID || returnResult == AllTaken || returnResult == NoResult) &&
-               (gtAllTaken == 0 && gtChild != nullptr)) {
-        returnResult = gtChild->pickValue(returnKV, selector >> 1, moveTo, removePick, depth + 1);
-        // if the node below declared itself allTaken, set the gtAllTaken flag
-        if (removePick && (returnResult == ResultFoundAndTakenByID)) {
-          gtAllTaken = moveToID;
+
+      // init the return codes to undefined.
+      SearchRet ltRetCode = Undefined;
+      SearchRet gtRetCode = Undefined;
+      // and inside to false.
+      bool inside = false;
+
+      // set the preferred recursion direction for this level from the selector
+      bool goGtThan = (selector & 0x1ULL) == 1;
+
+      // If preferred is lt or the preferred is gt but that path is blocked, 
+      // continue the search on the appropriate the lt child
+      if (!goGtThan) {
+        if (ltChild != nullptr) {
+          ltRetCode = ltChild->pickValue(returnKV, selector >> 1, moveTo, depth + 1);
         }
-        else if (removePick && (returnResult == ResultFoundAndTaken)) {
-          gtAllTaken = allTakenID;
+        else {
+          ltRetCode = AllTakenByID;
         }
       }
-    }
-    // If preferred is gt or the preferred is lt but that path is blocked, 
-    // continue the search on the appropriate the gt child
-    else if ((goGtThan || ltAllTaken != 0 || ltChild == nullptr) && (gtAllTaken == 0 && gtChild != nullptr)) {
-      returnResult = gtChild->pickValue(returnKV, selector >> 1, moveTo, removePick, depth + 1);
-      // if the node below declared itself allTaken, set the gtAllTaken flag
-      if (removePick && (returnResult == ResultFoundAndTakenByID)) {
-        gtAllTaken = moveToID;
-      }
-      else if (removePick && (returnResult == ResultFoundAndTaken)) {
-        gtAllTaken = allTakenID;
-      }
-      //if no result was found on the gt child, try the lt child
-      else if ((returnResult == AllTakenByID || returnResult == AllTaken || returnResult == NoResult) && 
-               (ltAllTaken == 0 && ltChild != nullptr)) {
-        returnResult = ltChild->pickValue(returnKV, selector >> 1, moveTo, removePick, depth + 1);
-        // if the node below declared itself allTaken, set the gtAllTaken flag
-        if (removePick && (returnResult == ResultFoundAndTakenByID)) {
-          ltAllTaken = moveToID;
+      if (goGtThan || returnKV.second == nullptr) {
+        if (gtChild != nullptr) {
+          gtRetCode = gtChild->pickValue(returnKV, selector >> 1, moveTo, depth + 1);
         }
-        else if (removePick && (returnResult == ResultFoundAndTaken)) {
-          ltAllTaken = allTakenID;
+        else {
+          gtRetCode = AllTakenByID;
         }
       }
-    }
+      if (ltRetCode == Undefined) { // indicating the lt child was not called above.
+        if (ltChild != nullptr)
+          ltRetCode = ltChild->allTakenSet.size() == 0 ? NoResult : AllTaken;
+        else
+          ltRetCode = AllTakenByID;
+      }
+      if (gtRetCode == Undefined) {// indicating the gt child was not called above.
+        if (gtChild != nullptr)
+          gtRetCode = gtChild->allTakenSet.size() == 0 ? NoResult : AllTaken;
+        else
+          gtRetCode = AllTakenByID;
+      }
 
-    if (returnResult == NoResult || returnResult == AllTaken || returnResult == AllTakenByID) {
-      if (values != nullptr) {
-        // grab a lock
-        std::lock_guard<std::mutex> guard(thisMutex);
-        // check again to make sure this node was not taken
-        if (values != nullptr) {
-          returnKV = retPair_t(tuple, values);
-          movedTo = moveTo;  // mark the node as taken by the searching container.
-          if (removePick) {
+
+      // if no result was found on either of the children, see if this value is available.
+      if (returnKV.second == nullptr) {  // have not found a value yet
+        if (values != nullptr) {  // see if we should grab a lock
+          // grab a lock
+          LOCK_THIS_BLOCK;
+          // check again to make sure this node was not taken
+          if (values != nullptr) {
+            returnKV.first = tuple;
+            returnKV.second = values;
+            movedTo = moveTo;  // mark the node as taken by the searching container.
             values = nullptr;
-            returnResult = ResultFoundAndTaken;  //flag for possible node all taken
+            inside = true;
           }
-          else {
-            returnResult = ResultFound;
-          }
+          UNLOCK_THIS_BLOCK;
         }
       }
+
+      // now figure out what to record in the allTakenSet and what code to return
+      // this first condition covers the case where the current and all nodes below are have been taken by the same ID. 
+      if (movedTo == moveTo && ltRetCode == AllTakenByID && gtRetCode == AllTakenByID) {
+        LOCK_THIS_BLOCK;
+        allTakenSet.insert(moveToID);
+        UNLOCK_THIS_BLOCK;
+        return AllTakenByID;
+      }
+      // this case handles the condition where all this node and the children have been taken by something but not all the same ID. 
+      if (movedTo != nullptr && ltRetCode != NoResult && gtRetCode != NoResult) {
+        LOCK_THIS_BLOCK;
+        allTakenSet.insert(allTakenID);
+        UNLOCK_THIS_BLOCK;
+        return AllTaken;
+      }
+      // if none of the above return nothing to change.
+      return NoResult;
     }
-    // Now figure out what to return.
-    // If the returnResult indicates ResultFoundAllTaken from a lower call but this node is not all taken, change returnResult to ResultFound
-    if (returnResult == ResultFoundAndTaken || returnResult == ResultFoundAndTakenByID) {
-      if (movedTo == moveTo && (ltAllTaken == moveToID || ltChild == nullptr) && (gtAllTaken == moveToID || gtChild == nullptr))
-        returnResult = ResultFoundAndTakenByID;
-      else if (movedTo != nullptr && (ltAllTaken != 0 || ltChild == nullptr) && (gtAllTaken != 0 || gtChild == nullptr))
-        returnResult = ResultFoundAndTaken;
-      else returnResult = ResultFound;
-    }
-    else if (returnResult == AllTaken || returnResult == AllTakenByID) {
-      if (movedTo == moveTo && (ltAllTaken == moveToID || ltChild == nullptr) && (gtAllTaken == moveToID || gtChild == nullptr))
-        returnResult = AllTakenByID;
-      else if (movedTo != nullptr && (ltAllTaken != 0 || ltChild == nullptr) && (gtAllTaken != 0 || gtChild == nullptr))
-        returnResult = AllTaken;
-      else returnResult = NoResult;
-    }
-     return returnResult;
-  }
 
- }; // class KdNodePDB
+  }; // class KdNodePDB
 
-  
-  
-
-  template<typename K, typename V, typename M, size_t N>
-class KdTreePDB {
-
-  typedef std::pair<K*, std::list<V>*> retPair_t;
 
 private:
   size_t numPoints = 0;  // total number of points submitted to the KdTree.
-  std::vector<KdNodePDB<K, V, M, N>*> kdNodes;  // vector of kdNodes resulting from submissions to the KdTree.
-  KdNodePDB<K, V, M, N>* root = nullptr;  // root of the KdTree after it's built
+  std::vector<KdNodePDB*> kdNodes;  // vector of kdNodes resulting from submissions to the KdTree.
+  KdNodePDB* root = nullptr;  // root of the KdTree after it's built
   std::vector<int64_t> permutation; // vector of pre-calculated levels
   signed_size_t numThreads = 1;     // number of threads used in the process
   signed_size_t maximumSubmitDepth = -1; // maximum depth in tree building or searching where new threads are submitted.
@@ -1036,7 +942,7 @@ private:
 
 public:
   // main constructor
-  KdTreePDB<K, V, M, N>() {
+  KdTreePDB() {
     numThreads = std::thread::hardware_concurrency();
     calcMaximumSubmitDepth();
   }
@@ -1052,24 +958,24 @@ public:
     if (tuple.size() != N) {
       return 0;
     }
-    auto kp = new KdNodePDB<K, V, M, N>(tuple, value);
+    auto kp = new KdNodePDB(tuple, value);
     kdNodes.push_back(kp);
     numPoints = kdNodes.size();
     return numPoints;
   }
 
- /**
- * <p>
- * The {@code searchKdTree} method searches the k-d tree and finds the KdNodes
- * that lie within a cutoff distance from a query node in all k dimensions.
- * </p>
- *
- * @param result - List of tuple,value pairs that are within the search region.
- * @param queryLower - Array containing the lager search bound for each dimension
- * @param queryUpper - Array containing the smaller search bound for each dimension
- * @param numThreads - the maximum tree depth at which a thread may be launched
- * @return bool indicating success.
- */
+  /**
+  * <p>
+  * The {@code searchKdTree} method searches the k-d tree and finds the KdNodes
+  * that lie within a cutoff distance from a query node in all k dimensions.
+  * </p>
+  *
+  * @param result - List of tuple,value pairs that are within the search region.
+  * @param queryLower - Array containing the lager search bound for each dimension
+  * @param queryUpper - Array containing the smaller search bound for each dimension
+  * @param numThreads - the maximum tree depth at which a thread may be launched
+  * @return bool indicating success.
+  */
 
   bool searchRegion(std::list<retPair_t>& retPair, std::vector<K>& queryLower, std::vector<K>& queryUpper) {
     // if the tree is not built yet, build it
@@ -1104,16 +1010,16 @@ public:
   */
 
   bool searchRegion(std::list<V>& retVal, std::vector<K>& queryLower, std::vector<K>& queryUpper) {
-      // if the tree is not built yet, build it
-      if (root == nullptr) {
-          buildTree();
-      }
-      std::list<retPair_t> retPair;
-      bool retFlag = searchRegion(retPair, queryLower, queryUpper, 1);
-      for (auto pp : retPair) {
-        retVal.splice(retVal.begin(), *pp.second);
-      }
-      return retFlag;
+    // if the tree is not built yet, build it
+    if (root == nullptr) {
+      buildTree();
+    }
+    std::list<retPair_t> retPair;
+    bool retFlag = searchRegion(retPair, queryLower, queryUpper, 1);
+    for (auto pp : retPair) {
+      retVal.splice(retVal.begin(), *pp.second);
+    }
+    return retFlag;
   }
 
   /*
@@ -1121,10 +1027,10 @@ public:
   */
   bool searchRegionAndRemove(std::list<retPair_t>& retPair, std::vector<K>& queryLower, std::vector<K>& queryUpper) {
     // if the tree is not built yet, build it
-    if (root == nullptr) { 
-      buildTree(); 
+    if (root == nullptr) {
+      buildTree();
     }
-    
+
     // Ensure that each query lower bound <= the corresponding query upper bound.
     for (size_t i = 0; i < queryLower.size(); ++i) {
       if (queryLower[i] > queryUpper[i]) {
@@ -1154,9 +1060,11 @@ public:
       }
     }
 
-    
+
     // Search the tree and return the resulting list of KdNodes.
-    root->regionSearchAndRemove(retPair, queryLower, queryUpper, moveTo, 0l, permutation);
+    {
+      root->regionSearchAndRemove(retPair, queryLower, queryUpper, moveTo, 0l, permutation);
+    }
     return true;
   }
 
@@ -1167,23 +1075,26 @@ public:
       setNumThreads(numThreads);
     }
     permutation = getPermutations(numPoints, N);
-    root = KdNodePDB<K, V, M, N>::createKdTree(kdNodes, numThreads, maximumSubmitDepth);
+    root = KdNodePDB::createKdTree(kdNodes, numThreads, maximumSubmitDepth);
     return true;
   }
 
-  
-  bool pickValue(retPair_t& returnKV, uint64_t selectionBias, M* moveTo, bool remove) {
-      // if the tree is not built yet, build it
+
+  bool pickValue(retPair_t& returnKV, uint64_t selectionBias, M* moveTo) {
+    // if the tree is not built yet, build it
     if (root == nullptr) {
-        buildTree();
-        // if root is still null; return a null
-        if (root == nullptr) return false;
-      }
-      // descent selector
-    // search the tree to find the node to return and possibly delete.
-    SearchRet returnResult = root->pickValue(returnKV, selectionBias, moveTo, remove, 0);
+      buildTree();
+      // if root is still null; return a null
+      if (root == nullptr) return false;
+    }
+    // descent selector
+  // search the tree to find the node to return and possibly delete.
+    returnKV.second = nullptr;
+    {
+      SearchRet returnResult = root->pickValue(returnKV, selectionBias, moveTo, 0);
+    }
     // Check to see if no data was returned.  If so then return false.
-    if (returnResult == NoResult || returnResult == AllTakenByID || returnResult == AllTaken) return false;
+    if (returnKV.second == nullptr) return false;
 
     return true;
   }
