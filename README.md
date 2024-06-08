@@ -1,4 +1,5 @@
 # A Multithreaded DBSCAN Clustering Implementation Using a K-d Tree
+\[ Special Note:  a previous version of this code had a performance pothole when the size of the cluster was large.  That pothole has been fixed in this version. \]
 
 The code included here implements the popular DBSCAN clustering algorithm [1] in C++. it is a multithreaded version of [DBSCAN-in-Cpp](https://github.com/johnarobinson77/DBSCAN-in-Cpp). Like the single-threaded version, this implementation uses a k-d tree to accelerate the cluster-building process. The k-d tree code is also presented here. Using a k-d tree improves the clustering performance in three ways.
 
@@ -55,19 +56,22 @@ This source code example below can be found in the main function in DBSCANtest.c
   }
 
   std::cout << "Checking to see that all values ended up in some cluster" << std::endl;
+
+  avlSet<dval_t> valMatch;
+  bool passed = true;
   for (size_t i = 0; i < mtdbscan->getNumClusters(); i++) {
     for (dval_t val : *mtdbscan->getClusterValueList(i)) {
-      indices[val] = true;
+      passed &= valMatch.insert(val);
+      passed &= val < static_cast<dval_t>(numPoints) && val >= static_cast<dval_t>(0);
     }
   }
-
-  bool passed = true;
-  for (size_t i = 0; i < numPoints; i++) passed &= indices[i];
-  if (passed) {
+  if (passed && valMatch.size() == numPoints) {
     std::cout << "Passed" << std::endl;
-  } else {
-    std::cout << "Failed to find all the values in the clusters." << std::endl;
   }
+  else {
+    std::cout << "Failed to find the same set values in the clusters as generated." << std::endl;
+  }
+  valMatch.clear();
 
   mtdbscan->sortClustersBySize();
 ```
@@ -82,7 +86,11 @@ Note that this interface is exactly the same as the single-threaded version in [
 
 **ParallelSort.hpp, and ParallelFor.hpp** contain code for sorting in parallel. It is used in the kdTree build code.
 
-**DBSCANtest.cpp** provides a test and an example and test case for the DBSCAN implementation The default test case is 1600 artificially clustered data with 4000 points per cluster. That data is presented to MTDBSCAN. The results should, therefore, end up with a Clusters list that is 1600 in size, and clusters will have an average of 4000 values. The parameters of the clustering can be overridden using command line arguments. Start with -h.
+**SimpleSort.h, and avlSet.h**  provide alternatives to the std::set() container which are faster and/or take less memory.  These alternatives are critical to performance due to the high utilization of sets in the cluster-building algorithm.  avlSet.h is a slightly modified version of avlTree.cpp that can be found at [https://github.com/chezruss/avl-tree](https://github.com/chezruss/avl-tree).
+
+**DBSCANtest.cpp** provides a test and an example and test case for the DBSCAN implementation The default test case is 1600 artificially clustered data with 4000 points per cluster. That data is presented to MTDBSCAN. The results should, therefore, end up with a Clusters list that is 1600 in size, and clusters will have an average of 4000 values. The parameters of the clustering can be overridden using command line arguments. Start with -h.  This file is not necessary other than to test the MTDBSCAN class.
+
+**ParseArgs.h** provides
 
 ## MTDBSCAN Class Methods
 
@@ -165,7 +173,7 @@ A solution to this is to merge the sub-clusters after the multi-threaded cluster
 In the picking and search routines, when a point is found that needs to be added to the current cluster, the node in the k-d tree is marked as having been taken by moving the values from that node to the cluster and storing a pointer to the current cluster that the values have been moved to in the node. When a subsequent search finds the same node that wants to be added to its cluster, one of two things happens.
 
 1. A movedTo pointer that is the same as the current cluster pointer indicates that the point is already in the current cluster. It is just ignored.
-2. A movedTo pointer that is different from the current cluster pointer indicates that the current cluster overlaps with the cluster to which the values have been moved. The movedTo and current clusters will need to be merged in the future. To identify this, the movedTo pointer is added in an std::set in the current cluster called the overlap set.
+2. A movedTo pointer that is different from the current cluster pointer indicates that the current cluster overlaps with the cluster to which the values have been moved. The movedTo and current clusters will need to be merged in the future. To identify this, the movedTo pointer is added in an avlSet in the current cluster called the overlap set.
 
 ### Merging Subclusters
 
@@ -185,12 +193,7 @@ While overlapping subclusters are functionally resolved, they hinder performance
 
 The picker function used to provide a seed point for a new cluster has a selectionBias parameter used to select a path through the k-d tree. The thread number is used to create a selectionBias that chooses a seed point that is as far away as possible from the other thread.
 
-Another optimization is to mark each child branch in a node in the k-d tree with an index of a cluster that has used all of the points below. If a search for a cluster with the same index is performed, that branch can be skipped. However, if a search for a cluster with a different index is in progress, that branch still needs to be searched for only overlaps.
-
-### Performance Pothole
-There is one performance pothole with the current code that can cause extreme performance degradation.  This happens when the search region is large relative to the area containing the data set, such that the results will end up with just a few clusters.  The requirement that a thread must search for a point in the cluster it's forming that has been taken by other clusters can result in very large search times in the k-d tree.  This performance degradation is only present when running multithreaded.  The current code may slow down as much as 4x relative to single threading.  
-
-Doing dbscan clustering with such a large search region is generally not very useful.  However, depending on the algorithm's use, it may not be avoidable.  There are several ways that this performance pothole is being mitigated, and more are being explored. 
+Another optimization is to mark each  node in the k-d tree with an index of the clusters that have taken or attempted to take all of the points below this node. That index is stored in a SimpleSet.  If a search hits a node where the moveTo index is found to be in the SimpleSet, any further search down it's children can be ignored. However, if a search for a cluster with a different index is in progress, those children still need to be searched for overlaps.
 
 ## Results
 
