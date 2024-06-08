@@ -199,7 +199,12 @@ Another optimization is to mark each  node in the k-d tree with an index of the 
 
 The chart below shows how processing time diminishes with increasing thread.  This performance data was taken on a 64-core Graviton processor on AWS.  The performance flattens out above 32 threads, likely due to memory bandwidth and increased overlapping sub-clusters.  The data set is 1600 artificially created groups of 4000 3-dimensional points each.  The search region is chosen to identify those groups as clusters.  These are the default settings in DBSCANtest.cpp.
 
-![Multithreaded DBSCAN Performance](https://github.com/johnarobinson77/Multithreaded-DBSCAN-Clustering-in-Cpp/blob/main/MTDBSCAN.PNG)
+![Multithreaded DBSCAN Performance](https://github.com/johnarobinson77/Multithreaded-DBSCAN-Clustering-in-Cpp/blob/main/MTDBSCAN.png)
+
+This next chart indicates the performance across a complete range of eventual cluster sizes.  The data set in this case consists of 16777216 3D points.  The data is grouped and the window is chosen such that it results in the number of clusters indicated at the X axis.  For example, the 1 cluser caseis the time it takes to cluster all 16777216 into a single cluster.  This chart shows that the time for clustering date into very large clusters increases 5 fold in this case.
+
+![Multithreaded DBSCAN Performance](https://github.com/johnarobinson77/Multithreaded-DBSCAN-Clustering-in-Cpp/blob/main/MTDBSCAN2.png)
+
 
 ## References
 
