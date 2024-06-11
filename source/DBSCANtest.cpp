@@ -10,17 +10,20 @@
 //#define DEBUG_PRINT  // enable this to add debug print messages.  must be defined befor including MTDBSCAN.hpp
 //#define COMPARISON_TEST // enables a full comparison of clusters between the multithreaded DBSCAN and single threaded DBSCAN
 //#define MEASURE_KDTREE_TIME // enables printing of the time to build the k-d tree  which is also included in the total time.
-
 #include <random>
 #include <chrono>
 #include <iomanip>
 #include "MTDBSCAN.hpp"
 #include "avlSet.h"
 #include "ParseArgs.h"
+#define _CRTDBG_MAP_ALLOC
+#include <stdlib.h>
+#ifdef _DEBUG
+#include <crtdbg.h>
+#endif
 #ifdef COMPARISON_TEST
 #include "dbscan.h"
 #endif
-
 
 // a slight rewrite of the Romdomer class from
 // https://stackoverflow.com/questions/13445688/how-to-generate-a-random-number-in-c/53887645#53887645
@@ -67,7 +70,7 @@ int main(int argc, const char* argv[])
 
   const int numDimensions = 3;            // dimensions of the point
   dkey_t searchRad = (dkey_t)(clusterSpan * sqrt(numDimensions) / sqrt(3));  // size of the cluster search window.
-
+  
   ParseArgs parseArgs;
   parseArgs.addArg("-c", "Set number of clusters", &numClusters);
   parseArgs.addArg("-p", "Set Number of points per cluster", &numPointsPer);
@@ -77,6 +80,8 @@ int main(int argc, const char* argv[])
   parseArgs.addArg("-g", "Set random number generator seed", &rngSeed);
   parseArgs.addHelpPretext("DBSCANtest <args> is a test of the multithreaded DBSCAN code in MTDBSCAN.hpp");
   if (!parseArgs.parse(argc, argv)) exit(1);
+  parseArgs.clear();
+  
   //std::cout << parseArgs.getValuesString() << std::endl;
   std::cout << "number of clusters = " << numClusters << " number of points per cluster = " << numPointsPer << " cluster span = " << clusterSpan <<
                "\nsearch window = " << searchRad << " threads = " << numThreads << " random number seed = " << rngSeed << std::endl << std::endl;
@@ -93,17 +98,14 @@ int main(int argc, const char* argv[])
   // calculate the total number of points and create a coordinate array to hold them
   size_t numPoints = numClusters * numPointsPer;
   auto coordinates = new std::vector<dkey_t>[numPoints];
-  // create a list that will be used later  check that all the right values have been returned.
   auto riSmall = RandomIntervalPDB(-clusterSpan, clusterSpan, riLarge() % 1000);
   int64_t idx = 0;
-  bool* indices = new bool[numPoints];
   for (int64_t j = 0; j < numPointsPer; j++) {
     for (int64_t i = 0; i < numClusters; i++) {
       for (int64_t k = 0; k < numDimensions; k++) {
         dkey_t tmp = riSmall();
         coordinates[idx].push_back(clusterCenters[i * numDimensions + k] + tmp);
       }
-      indices[idx] = false;
       idx++;
     }
   }
@@ -143,7 +145,7 @@ int main(int argc, const char* argv[])
   }
 
   std::cout << "Checking to see that all values ended up in some cluster" << std::endl;
-
+  
   avlSet<dval_t> valMatch;
   bool passed = true;
   for (size_t i = 0; i < mtdbscan->getNumClusters(); i++) {
@@ -156,10 +158,10 @@ int main(int argc, const char* argv[])
     std::cout << "Passed" << std::endl;
   }
   else {
-    std::cout << "Failed to find the same set values in the clusters as generated." << std::endl;
+    std::cout << "ERROR: Failed to find the same set values in the clusters as generated." << std::endl;
   }
   valMatch.clear();
-
+  
 #ifdef COMPARISON_TEST
 
   // the comparison test runs the same data through the single threaded dbscan code and 
@@ -275,28 +277,39 @@ int main(int argc, const char* argv[])
   delete dbscan;
 
 #endif
-
   delete mtdbscan;
 
-  std::cout << "Starting sorting test of a small 5 cluster case." << std::endl;
-  auto dbscan1 = new MTDBSCAN<dkey_t, dval_t, 1>();
+  bool doSortTest = true;
+  if (doSortTest) {
+    std::cout << "Starting sorting test of a small 5 cluster case." << std::endl;
+    auto dbscan1 = new MTDBSCAN<dkey_t, dval_t, 1>();
 
-  std::vector<dkey_t> smallc{ 1, 101, 201, 301, 401, 2, 102, 202, 302, 3, 103, 203, 4, 104, 5 };
-  for (size_t i = 0; i < smallc.size(); i++) {
-    dbscan1->addPointWithValue(std::vector<dkey_t>{smallc[i]}, i);
+    const std::vector<dkey_t> smallc{ 1, 101, 201, 301, 401, 2, 102, 202, 302, 3, 103, 203, 4, 104, 5 };
+    std::vector<dkey_t> tc(1);
+    for (size_t i = 0; i < smallc.size(); i++) {
+      tc[0] = smallc[i];
+      dbscan1->addPointWithValue(tc, i);
+    }
+    std::vector<dkey_t> window1{ 2 };
+    dbscan1->setWindow(window1);
+    dbscan1->build();
+    dbscan1->sortClustersBySize();
+    std::cout << "Sorted cluster sized are:";
+    for (size_t i = 0; i < dbscan1->getNumClusters(); i++) {
+      std::cout << " " << dbscan1->getClusterSize(i);
+    }
+    std::cout << std::endl;
+    delete dbscan1;
   }
-  std::vector<dkey_t> window1{ 2 };
-  dbscan1->setWindow(window1);
-  dbscan1->build();
-  dbscan1->sortClustersBySize();
-  std::cout << "Sorted cluster sized are:";
-  for (size_t i = 0; i < dbscan1->getNumClusters(); i++) {
-    std::cout << " " << dbscan1->getClusterSize(i);
-  }
-  std::cout << std::endl;
 
-  delete[] indices;
-  delete dbscan1;
+  delete[] coordinates;
+  delete[] clusterCenters;
+  window.clear();
+
+#ifdef _DEBUG
+  _CrtSetReportMode(_CRT_WARN, _CRTDBG_MODE_DEBUG);
+  _CrtDumpMemoryLeaks();
+#endif
   exit(0);
 
 }

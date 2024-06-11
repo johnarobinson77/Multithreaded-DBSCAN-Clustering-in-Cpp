@@ -110,6 +110,7 @@ class MTDBSCAN {
 
     bool addToCluster(K* kdKey, std::list<V>* values) {
       this->values->splice(this->values->end(), *values);
+      delete values;
       clusterBounds.addToBounds(kdKey);
       return true;
     }
@@ -138,7 +139,7 @@ class MTDBSCAN {
   // this vector contains the distance to the edge of the search window in each dimension.
   std::vector<K> clusterWindowRadius;
 
-  bool buildCluster(std::list<Cluster*>* clusters, std::list<Cluster*>* overlaps, int64_t threadNum, bool oneTime = false) {
+  bool buildCluster(std::list<Cluster*>* clusters, std::list<Cluster*>* overlaps, int64_t threadNum) {
     std::vector<K> qLower(N);  //allocate 2 vectors for the upper and lower corners of the window
     std::vector<K> qUpper(N);
     auto keys = new std::list<K*>();  // holds the list of the points to be searched for a cluster.
@@ -179,9 +180,12 @@ class MTDBSCAN {
           overlaps->push_back(newCluster);
         }
       }
+      else {
+        delete newCluster;
+      }
       newCluster = new Cluster(IDCounter, IDCounterMutex);  // create a new cluster
-      if (oneTime) break;
     }
+    if (newCluster->values->size() == 0) delete newCluster;
     delete keys;
     return true;
   }
@@ -240,6 +244,7 @@ public:
   ~MTDBSCAN() {
     for (size_t i = 0; i < clusters->size(); i++) {
       delete clusters->at(i);
+      if (kdTree != nullptr) delete kdTree;
     }
     delete clusters;
   }
@@ -252,7 +257,7 @@ public:
   }
 
   // addPoint fuction adds a point or key and an associated value to the MTDBSCAN object
-  size_t addPointWithValue(std::vector<K> point, V value) {
+  size_t addPointWithValue(std::vector<K>& point, V value) {
     numValues = kdTree->add(point, value);
     return numValues;
   }
@@ -297,16 +302,21 @@ public:
       //returnStatus = returnStatus && buildCluster( clustersPerThread[i], overlapClusters[i], i, true);
     }
 
+    
      //Now start start the individual threads.
     for (int i = 0; i < numThreads; i++) {
       futures.push_back(std::async(std::launch::async,
-        &MTDBSCAN<K, V, N>::buildCluster, this, clustersPerThread[i], overlapClusters[i], i, false));
+        &MTDBSCAN<K, V, N>::buildCluster, this, clustersPerThread[i], overlapClusters[i], i));
     }
-
+    /*
+    for (int i = 0; i < numThreads; i++) {
+      returnStatus = returnStatus && buildCluster (clustersPerThread[i], overlapClusters[i], i);
+    }
+    */
     // get the results back from each thread.
     for (int i = 0; i < futures.size(); i++) 
       returnStatus = returnStatus && futures[i].get();
-
+    
     if (returnStatus == true) {
 
 
@@ -380,14 +390,14 @@ public:
         [](const Cluster* a, const Cluster* b) -> bool
         {
           return a->values->size() > b->values->size();
-        });
+        },4);
     }
     else {
       parallelSort(clusters->begin(), clusters->end(),
         [](const Cluster* a, const Cluster* b) -> bool
         {
           return a->values->size() < b->values->size();
-        });
+        },4);
     }
   }
 
@@ -398,7 +408,7 @@ public:
       [](const Cluster* a, const Cluster* b) -> bool
       {
         return a->values->front() > b->values->front();
-      });
+      },4);
   }
 
   // cluster setters and getters
