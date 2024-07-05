@@ -28,13 +28,14 @@
 #include <future>
 #include "parallelSort.hpp"
 #include "avlSet.h"
-#include "SimpleSet.h"
+#include "SimpleContainers.h"
+
+std::atomic<size_t> nodesVisited = 0;
 
 /*
  * This type is the signed equivalent of size_t and might be equivalent to intmax_t
  */
 typedef int64_t signed_size_t;
-
 
 enum SearchRet { // The following are codes that the search routines will return indicating the status of then child node visited.
   Undefined,                // indicates the values, ltChile and gtChild pointer are all null.
@@ -46,6 +47,7 @@ enum SearchRet { // The following are codes that the search routines will return
 // this is an ID that is used to indicate all taken when the nodes below do not match all IDs.
 const uint32_t allTakenID = 0xFFFFFFFF;
 
+
 // the KdTreePDB class provide a user interface wrapper around the kdNodePDB objects that 
 // form the actual k-d tree.
 template<typename K, typename V, typename M, size_t N>
@@ -54,38 +56,53 @@ class KdTreePDB {
   // this is ther return type
   typedef std::pair<K*, std::list<V>*> retPair_t;
 
+
   class KdNodePDB {
 
     typedef std::pair<K*, std::list<V>*> retPair_t;
 
-  public:
-    K tuple[N];
   private:
+    K tuple[N];
     KdNodePDB* ltChild;
     KdNodePDB* gtChild;
-    std::list<V>* values = nullptr;
-    std::mutex thisMutex;
-    M* movedTo = nullptr;        // pointer to the container that is holding the values that were here.
-    SimpleSet allTakenSet;       // set of IDs of the containers that have taken values this an all nodes below.
+    std::list<V, STLAdaptor<V>>* values;  // list of values associated with the point in tuple
+    std::mutex thisMutex;       // used to lock this node when it is being taken by a cluster or updating the allTakenSet
+    M* movedTo = nullptr;       // pointer to the container that is holding the values that were here.
+    SimpleSet allTakenSet;      // set of IDs of the clusters that have taken values from this node and all nodes below.
 
   public:
-    KdNodePDB(V const value) { // Pass non-primitive types as 'V const&'
+    // need to make sure allocator pointers are provided when construction occures so delete the default
+    KdNodePDB() = delete;
+
+    // constructor for entering the point only.
+    KdNodePDB(V const value, STLAdaptor<V>* adaptorV, SimpleAlloc* alloc) { // Pass non-primitive types as 'V const&'
       for (size_t i = 0; i < N; i++) this->tuple[i] = (K)0;
       ltChild = gtChild = nullptr; // redundant
-      values = new std::list<V>();
+      // create the lest of values
+      void* tp = alloc->allocate(sizeof(std::list<V, STLAdaptor<V>>), alignof(std::list<V, STLAdaptor<V>>));
+      values = new(tp)  std::list<V, STLAdaptor<V>>(*adaptorV);
       values->push_back(value);
+      // create the list for SimpleSet used for the allTakenSet
+      allTakenSet.setup(alloc);
     }
 
-    KdNodePDB(std::vector<K>& tuple, V const value) { // Pass non-primitive types as 'V const&'
+    // constructor for entering the point and value
+    KdNodePDB(std::vector<K>& tuple, V const value, STLAdaptor<V>* adaptorV, SimpleAlloc* alloc)
+    { // Pass non-primitive types as 'V const&'
       for (size_t i = 0; i < N; i++) this->tuple[i] = tuple[i];
       ltChild = gtChild = nullptr; // redundant
-      values = new std::list<V>();
+      // create the lest of values
+      void* tp = alloc->allocate(sizeof(std::list<V, STLAdaptor<V>>), 
+        alignof(std::list<V, STLAdaptor<V>>));
+      values = new(tp)  std::list<V, STLAdaptor<V>>(*adaptorV);
       values->push_back(value);
+      // create the list for SimpleSet used for the allTakenSet
+      allTakenSet.setup(alloc);
     }
 
   public:
     ~KdNodePDB() {
-      delete values;
+      std::cout << "Should not have been called.\n";
     }
 
   public:
@@ -147,8 +164,8 @@ class KdTreePDB {
         }
         else {
           // append vales to the end of the kept kdNode and delete the now unused node
-          kdNodes[end]->values->splice(kdNodes[end]->values->end(), *kdNodes[j]->values);
-          delete kdNodes[j];
+          kdNodes[end]->values->splice(kdNodes[end]->values->end(), *(kdNodes[j]->values));
+          //delete kdNodes[j];
         }
       }
       return end;
@@ -347,7 +364,7 @@ class KdTreePDB {
           // Create a copy of the node->tuple array so that the current thread
           // and the child thread do not contend for read access to this array.
           K* tuple = node->tuple;
-          K* point = new K[N];
+          K point[N];
           for (size_t i = 0; i < N; ++i) {
             point[i] = tuple[i];
           }
@@ -401,9 +418,6 @@ class KdTreePDB {
               std::cout << "caught exception " << e.what() << std::endl;
             }
           }
-
-          // Delete the point array.
-          delete[] point;
 
           // Recursively build the < branch of the tree with a child thread.
           // The recursive call to buildKdTree must be placed in a lambda
@@ -551,54 +565,13 @@ class KdTreePDB {
       return root;
     }
 
-    /*
-      * Walk the k-d tree to delete each KdNode.
-      */
-  public:
-    void deleteKdTree() {
-
-      // Delete the < sub-tree.
-      if (ltChild != nullptr) {
-        ltChild->deleteKdTree();
-      }
-      // Delete the > sub-tree.
-      if (gtChild != nullptr) {
-        gtChild->deleteKdTree();
-      }
-      // Delete the current KdNode.
-      delete this;
-    }
-
-    /*
-      * The insideBounds function determines whether KdNode::tuple lies inside the
-      * hyper-rectangle defined by the query lower and upper bound vectors.
-      *
-      * Calling parameters:
-      *
-      * queryLower - the query lower bound vector
-      * queryUpper - the query upper bound vector
-      * enable - a vector that specifies the dimensions on which to test for insidedness
-      *
-      * return true if inside, false if outside
-      */
-  private:
-    bool insideBounds(std::vector<K> const& queryLower, std::vector<K> const& queryUpper,
-      std::vector<bool> const& enable) {
-      bool inside = true;
-      for (size_t i = 0; i < queryLower.size(); ++i) {
-        if (enable[i] && (queryLower[i] > tuple[i] || queryUpper[i] < tuple[i])) {
-          inside = false;
-          break;
-        }
-      }
-      return inside;
-    }
-
 // The following two macros are used as pairs to protect critical code from
 // being accessed at the same time by different thread.  These macros 
-// allow diffent means of preforming that lock to be experimented with.
+// allow different means of preforming that locks to be experimented with.
 #define LOCK_THIS_BLOCK thisMutex.lock()
 #define UNLOCK_THIS_BLOCK thisMutex.unlock() 
+//#define LOCK_THIS_BLOCK 
+//#define UNLOCK_THIS_BLOCK 
 
     /*
      * The checkAllTakenStatus function checks the all taken status of this
@@ -634,44 +607,37 @@ class KdTreePDB {
      *
      * Calling parameters:
      *
-     * result - list of key value pairs found during the search
-     * queryLower - the query lower bound vector
-     * queryUpper - the query upper bound vector
-     * moveTo - pointer to the cluster into which the found items will be placed
-     * permutation - vector that specifies permutation of the partition coordinate
-     * maximumSubmitDepth - the maximum tree depth at which a child task may be launched
-     * depth - the depth in the k-d tree
+     * result:      reference to a list of where to put pointers to the tuples of the taken points.
+     * queryLower:  the query lower bound vector
+     * queryUpper:  the query upper bound vector
+     * moveTo:      pointer to the cluster into which the found items will be placed
+     * permutation: vector that specifies permutation of the partition coordinate
+     * maximumSubmitDepth: the maximum tree depth at which a child task may be launched
+     * depth:       the current depth in the k-d tree
      *
      * return - a SearchReturn enum indicating whether all the nodes in the tree below have
      *          already been taken by this cluster.
      */
   public:
-    SearchRet regionSearchAndRemove(std::list<retPair_t*>& result,
+    SearchRet regionSearchAndRemove(SimpleList<K*>& result,
       const std::vector<K>& queryLower, const std::vector<K>& queryUpper,
-      M* const moveTo, const signed_size_t depth, const std::vector<int64_t>& permutation) {
+      M* const moveTo, const signed_size_t depth, const std::vector<int64_t>& permutation, size_t treeIdx) {
 
       // get a local copy of the cluster ID;
       const uint32_t moveToID = moveTo->getID();
 
-      // figure out if there is any need to proceed further in this node
-      // if all nodes below have already been taken by this container, just return with the 
-      // proper code.
-      if (allTakenSet.size() > 0) {
-        LOCK_THIS_BLOCK;
-        if (allTakenSet.contains(moveToID)) {
-          UNLOCK_THIS_BLOCK;
-          return AllTakenByID;
-        }
-        UNLOCK_THIS_BLOCK;
-      }
+      //nodesVisited++;
+
+      bool ltFlag = false;
+      bool gtFlag = false;
 
       // Look up the primary coordinate index.
       unsigned int p = (unsigned int)permutation[(unsigned int)depth];
 
       // These return codes indicate whether the status of the node that was just returned from
       // init the return result to NoResult
-      SearchRet ltRetCode = NoResult;
-      SearchRet gtRetCode = NoResult;
+      SearchRet ltRetCode = Undefined;
+      SearchRet gtRetCode = Undefined;
       bool inside = false;
 
       // Search the < branch of the k-d tree if the partition coordinate of the queryPlus is
@@ -681,8 +647,11 @@ class KdTreePDB {
       // which forms the most significant portion of the super key, shows equality.
       if (queryLower[p] <= tuple[p]) {
         // but only search if the ltChild pointer is not null 
-        if (ltChild != nullptr)
-          ltRetCode = ltChild->regionSearchAndRemove(result, queryLower, queryUpper, moveTo, depth + 1, permutation);
+        if (ltChild != nullptr) {
+          ltRetCode = ltChild->checkAllTakenStatus(moveToID);
+          if (ltRetCode != AllTakenByID)
+            ltFlag = true;// defer going doen the lt branch until after this nodes point have veen added to the result FIFO
+        }
         else
           ltRetCode = AllTakenByID;
         // Search the > branch of the k-d tree if the partition coordinate of the queryPlus is
@@ -692,61 +661,64 @@ class KdTreePDB {
         // which forms the most significant portion of the super key, shows equality.
         if (queryUpper[p] >= tuple[p]) {
           // Only search if the gtChild pointer is not null.  Otherwise report the return code as all taken.
-          if (gtChild != nullptr)
-            gtRetCode = gtChild->regionSearchAndRemove(result, queryLower, queryUpper, moveTo, depth + 1, permutation);
+          if (gtChild != nullptr) {
+            gtRetCode = gtChild->checkAllTakenStatus(moveToID);
+            if (gtRetCode != AllTakenByID)
+              gtFlag = true; // defer going doen the gt branch until after this nodes point have veen added to the result FIFO
+          }
           else
             gtRetCode = AllTakenByID;
           // Now check to see if the local tuple is inside the the hypercube.
           // the test to down both children is a necessary but not sufficient indication of being inside.
           // If the distance from the query node to the k-d node is within the query rectangle
-          // in all k dimensions, add the tuple and values to the return list.
-          inside = true;
-          for (size_t i = 0; i < queryUpper.size(); i++) {
-            if ((queryUpper[i] < tuple[i]) || (queryLower[i] > tuple[i])) {
-              inside = false;
-              break;
-            }
-          }
-          if (inside) {
-            // check if we need to grab a lock on this node
-            LOCK_THIS_BLOCK;
-            // check if the node had not already been taken after we have the lock
-            if (values != nullptr) {
-              // if it has not, add this nodes data to the return list and mark the node as taken
-              retPair_t* tmpPair = new retPair_t(tuple, values);
-              result.push_back(tmpPair);
-              movedTo = moveTo;  // mark the value as taken by another container.
-              values = nullptr;   // mark the node dead by nulling the pointer
-            }
-            else if (moveTo != movedTo) {
-              // if this node was taken by another cluster, indicate this cluster overlaps that cluster
-              // by adding it to the overlaps set.
-              if (moveTo->overlaps == nullptr) {
-                moveTo->overlaps = new avlSet<M*>;
+          // in all k dimensions, add the tuple to the return list an add the values to the cluster.
+          if (moveTo != movedTo) {
+            inside = true;
+            for (size_t i = 0; i < queryUpper.size(); i++) {
+              if ((queryUpper[i] < tuple[i]) || (queryLower[i] > tuple[i])) {
+                inside = false;
+                break;
               }
-              auto rslt = moveTo->overlaps->insert(movedTo);
-#ifdef DEBUG_PRINT
-              static std::mutex printMutex;
-              if (rslt.second == true) {
-                std::lock_guard<std::mutex> guard(printMutex);
-                std::cout << "cluster " << moveToID << " overlaps with cluster " << movedTo->getID() << "\n";
-              }
-#endif //DEBUG_PRINT
             }
-            UNLOCK_THIS_BLOCK;
+            
+            if (inside) {
+              // check if we need to grab a lock on this node
+              LOCK_THIS_BLOCK;
+              // check if the node had not already been taken after we have the lock
+              if (movedTo == nullptr) {
+                // if it has not, add this nodes data to the return list and cluster
+                result.push_back(tuple);
+                moveTo->addToCluster(tuple, *values);
+                movedTo = moveTo;  // mark the value as taken by this cluster.
+              }
+              else {
+                // this node was taken by another cluster, so indicate this cluster overlaps 
+                // that cluster by adding it to the overlaps set.
+                if (moveTo->overlaps == nullptr) {
+                  moveTo->overlaps = new avlSet<M*>;
+                }
+                auto rslt = moveTo->overlaps->insert(movedTo);
+              }
+              UNLOCK_THIS_BLOCK;
+            }
           }
         }
-        // since we did not go down the gtChild path, that that nodes taken status.
-        if (gtChild != nullptr)
-          gtRetCode = gtChild->checkAllTakenStatus(moveToID);
-        else
-          gtRetCode = AllTakenByID;
-      }
-      else { // Since we did not go down either child nodes, get their taken status.
-        if (queryUpper[p] >= tuple[p]) {
-          // but only search if the gtChild pointer is not null and all nodes below are not taken for this container
+        else {
+          // since we did not go down the gtChild path, get that nodes taken status.
           if (gtChild != nullptr)
-            gtRetCode = gtChild->regionSearchAndRemove(result, queryLower, queryUpper, moveTo, depth + 1, permutation);
+            gtRetCode = gtChild->checkAllTakenStatus(moveToID);
+          else
+            gtRetCode = AllTakenByID;
+        }
+      }
+      else { // Since we did not go down the < path, check the > path.
+        if (queryUpper[p] >= tuple[p]) {
+          // but only search if the gtChild pointer is not null and all nodes below are not taken for this cluster
+          if (gtChild != nullptr) {
+            gtRetCode = gtChild->checkAllTakenStatus(moveToID);
+            if (gtRetCode != AllTakenByID)
+              gtFlag = true; // defer going doen the lt branch until later
+          }
           else
             gtRetCode = AllTakenByID;
           if (ltChild != nullptr)
@@ -755,6 +727,11 @@ class KdTreePDB {
             ltRetCode = AllTakenByID;
         }
       }
+
+      if (ltFlag) // now perform the search of the lt branch
+        ltRetCode = ltChild->regionSearchAndRemove(result, queryLower, queryUpper, moveTo, depth + 1, permutation, treeIdx << 1);
+      if (gtFlag) // now perform the search of the gt branch
+        gtRetCode = gtChild->regionSearchAndRemove(result, queryLower, queryUpper, moveTo, depth + 1, permutation, (treeIdx << 1) + 1);
 
       // now figure out what to record in the allTakenSet and what code to return
       // this first condition covers the case where the current and all nodes below are have been taken by the same ID. 
@@ -771,7 +748,7 @@ class KdTreePDB {
         UNLOCK_THIS_BLOCK;
         return AllTakenByID;
       }
-      // this case handles the condition where all this node and the children have been taken by something but not all the same ID. 
+      // this case handles the condition where  this node and the children have been taken by some cluster but not all the same ID. 
       if (movedTo != nullptr && ltRetCode != NoResult && gtRetCode != NoResult) {
         LOCK_THIS_BLOCK;
         allTakenSet.insert(allTakenID);
@@ -782,29 +759,41 @@ class KdTreePDB {
       return NoResult;
     }
 
+    void allTakenCheck(bool& allTaken, M* moveTo) {
+      if (movedTo != moveTo) {
+        allTaken = false;
+        return;
+      }
+      if (ltChild != nullptr && allTaken) {
+        ltChild->allTakenCheck(allTaken, moveTo);
+      }
+      if (gtChild != nullptr && allTaken) {
+        gtChild->allTakenCheck(allTaken, moveTo);
+      }
+     }
+
     /*
-  The pickValue picks a value from the kdTree by descending to the lowest point in the tree that it finds
-  a node where a value has not been taken yet.
-  Parameters:
-    returnKV:   reference to a retPair where to place the tuple and value.
-    selector:   unsigned in where the bits are used to guide which child node to descend
-    moveTo:     pointer to some object that will hold the value found
-    depth:      integer counting the number of levels descended.
+    The pickValue picks a value from the kdTree by descending to the lowest point in the tree that it finds
+    a node where a value has not been taken yet.
+    Parameters:
+      result:     reference to a list of where to put a pointer to the tuple of the picked point.
+      selector:   unsigned uint64_t where the bits are used to guide which child node to descend
+      moveTo:     pointer to cluster where that will contain the value picked
+      depth:      integer counting the number of levels descended.
 
-     return - a SearchReturn enum indicating whether all the nodes in the tree below have
-              already been taken by this cluster.
-
-  **/
+      return - a SearchReturn enum indicating whether all the nodes in the tree below have
+                already been taken by this cluster.
+    **/
 
   public:
-    SearchRet pickValue(retPair_t& returnKV, const uint64_t selector, M* const moveTo, const int depth) {
+    SearchRet pickValue(SimpleList<K*>& result, const uint64_t selector, M* const moveTo, const int depth) {
 
       // get a local copy of the container ID
       const uint32_t& moveToID = moveTo->getID();
 
       // figure out if there is any need to proceed further down the tree.
       // if this nodes all taken set has any values it in, no further search is required.
-      if (allTakenSet.size() > 0) {
+     if (allTakenSet.size() > 0) {
         return AllTaken;
       }
 
@@ -821,20 +810,37 @@ class KdTreePDB {
       // continue the search on the appropriate the lt child
       if (!goGtThan) {
         if (ltChild != nullptr) {
-          ltRetCode = ltChild->pickValue(returnKV, selector >> 1, moveTo, depth + 1);
+          ltRetCode = ltChild->pickValue(result, selector >> 1, moveTo, depth + 1);
         }
         else {
           ltRetCode = AllTakenByID;
         }
+        if (result.size() == 0LLU) {
+          if (gtChild != nullptr) {
+            gtRetCode = gtChild->pickValue(result, selector >> 1, moveTo, depth + 1);
+          }
+          else {
+            gtRetCode = AllTakenByID;
+          }
+        }
       }
-      if (goGtThan || returnKV.second == nullptr) {
+      else {
         if (gtChild != nullptr) {
-          gtRetCode = gtChild->pickValue(returnKV, selector >> 1, moveTo, depth + 1);
+          gtRetCode = gtChild->pickValue(result, selector >> 1, moveTo, depth + 1);
         }
         else {
           gtRetCode = AllTakenByID;
         }
+        if (result.size() == 0LLU) {
+          if (ltChild != nullptr) {
+            ltRetCode = ltChild->pickValue(result, selector >> 1, moveTo, depth + 1);
+          }
+          else {
+            ltRetCode = AllTakenByID;
+          }
+        }
       }
+
       if (ltRetCode == Undefined) { // indicating the lt child was not called above.
         if (ltChild != nullptr)
           ltRetCode = ltChild->allTakenSet.size() == 0 ? NoResult : AllTaken;
@@ -842,7 +848,7 @@ class KdTreePDB {
           ltRetCode = AllTakenByID;
       }
       if (gtRetCode == Undefined) {// indicating the gt child was not called above.
-        if (gtChild != nullptr)
+        if (gtChild != nullptr) 
           gtRetCode = gtChild->allTakenSet.size() == 0 ? NoResult : AllTaken;
         else
           gtRetCode = AllTakenByID;
@@ -850,16 +856,17 @@ class KdTreePDB {
 
 
       // if no result was found on either of the children, see if this value is available.
-      if (returnKV.second == nullptr) {  // have not found a value yet
-        if (values != nullptr) {  // see if we should grab a lock
+      if (result.size() == 0LLU) {  // have not found a value yet
+        if (movedTo == nullptr) {  // see if we should grab a lock
           // grab a lock
           LOCK_THIS_BLOCK;
           // check again to make sure this node was not taken
-          if (values != nullptr) {
-            returnKV.first = tuple;
-            returnKV.second = values;
-            movedTo = moveTo;  // mark the node as taken by the searching container.
-            values = nullptr;
+          if (movedTo == nullptr) {
+            // capture the data from this node.
+            result.push_back(tuple);
+            moveTo->addToCluster(tuple, *values);
+            // mark the node as taken by the searching container.
+            movedTo = moveTo;  
             inside = true;
           }
           UNLOCK_THIS_BLOCK;
@@ -890,7 +897,9 @@ class KdTreePDB {
 
 private:
   size_t numPoints = 0;  // total number of points submitted to the KdTree.
-  std::vector<KdNodePDB*> kdNodes;  // vector of kdNodes resulting from submissions to the KdTree.
+  std::vector<KdNodePDB*> kdNodePtrs;  // vector of kdNodes resulting from submissions to the KdTree.
+  SimpleAlloc simpleAlloc;  // Local memory allocator.  
+  STLAdaptor<V>* adaptorV;  // pointer to an adaptor that wraps simpleAlloc for use with STL containers of type V
   KdNodePDB* root = nullptr;  // root of the KdTree after it's built
   std::vector<int64_t> permutation; // vector of pre-calculated levels
   signed_size_t numThreads = 1;     // number of threads used in the process
@@ -945,6 +954,7 @@ public:
   KdTreePDB() {
     numThreads = std::thread::hardware_concurrency();
     calcMaximumSubmitDepth();
+    adaptorV  = new STLAdaptor<V>(simpleAlloc);
   }
 
   // sets the number of threads to use but that number is forced to the next lower power of 2.
@@ -958,74 +968,31 @@ public:
     if (tuple.size() != N) {
       return 0;
     }
-    auto kp = new KdNodePDB(tuple, value);
-    kdNodes.push_back(kp);
-    numPoints = kdNodes.size();
+    // allocate a KdNode from the local allocator
+    // provide the allocator and adaptor 
+    void* tp = simpleAlloc.allocate(sizeof(KdNodePDB), alignof(KdNodePDB));
+    auto kp = new(tp) KdNodePDB(tuple, value, adaptorV, &simpleAlloc);
+    // add a KdNode pointer to the pointer list.
+    kdNodePtrs.push_back(kp);
+    numPoints = kdNodePtrs.size();
     return numPoints;
   }
 
-  /**
-  * <p>
-  * The {@code searchKdTree} method searches the k-d tree and finds the KdNodes
-  * that lie within a cutoff distance from a query node in all k dimensions.
-  * </p>
-  *
-  * @param result - List of tuple,value pairs that are within the search region.
-  * @param queryLower - Array containing the lager search bound for each dimension
-  * @param queryUpper - Array containing the smaller search bound for each dimension
-  * @param numThreads - the maximum tree depth at which a thread may be launched
-  * @return bool indicating success.
-  */
-
-  bool searchRegion(std::list<retPair_t>& retPair, std::vector<K>& queryLower, std::vector<K>& queryUpper) {
-    // if the tree is not built yet, build it
-    if (root == nullptr) {
-      buildTree();
-    }
-    // Ensure that each query lower bound <= the corresponding query upper bound.
-    for (size_t i = 0; i < queryLower.size(); ++i) {
-      if (queryLower[i] > queryUpper[i]) {
-        K tmp = queryLower[i];
-        queryLower[i] = queryUpper[i];
-        queryUpper[i] = tmp;
-      }
-    }
-
-    // Search the tree and return the resulting list of KdNodes.
-    root->regionSearch(retPair, queryLower, queryUpper, maximumSubmitDepth, 0, permutation);
-    return true;
-  }
-
-  /**
-  * <p>
-  * The {@code searchKdTree} method searches the k-d tree and finds the KdNodes
-  * that lie within a cutoff distance from a query node in all k dimensions.
-  * </p>
-  *
-  * @param result - values where the associated tuples that are within the search region.
-  * @param queryLower - Array containing the lager search bound for each dimension
-  * @param queryUpper - Array containing the smaller search bound for each dimension
-  * @param numThreads - the maximum tree depth at which a thread may be launched
-  * @return bool indicating success.
-  */
-
-  bool searchRegion(std::list<V>& retVal, std::vector<K>& queryLower, std::vector<K>& queryUpper) {
-    // if the tree is not built yet, build it
-    if (root == nullptr) {
-      buildTree();
-    }
-    std::list<retPair_t> retPair;
-    bool retFlag = searchRegion(retPair, queryLower, queryUpper, 1);
-    for (auto pp : retPair) {
-      retVal.splice(retVal.begin(), *pp.second);
-    }
-    return retFlag;
-  }
-
   /*
-  Same as searchRegion but the nodes that contained the items added to the retPair list are removed from the KdTree
-  */
-  bool searchRegionAndRemove(std::list<retPair_t>& retPair, std::vector<K>& queryLower, std::vector<K>& queryUpper) {
+ * The searchRegionAndRemove function searches the k-d tree to find the KdNodes that
+ * lie within a hyper-rectangle defined by the query lower and upper bounds.
+ *
+ * Calling parameters:
+ *
+ * result:      reference to a list of where to put pointers to the tuples of the taken points.
+ * queryLower:  the query lower bound vector
+ * queryUpper:  the query upper bound vector
+ * moveTo:      pointer to the cluster into which the found items will be placed
+ *
+ * return:      a Boolean that is always true;
+ */
+
+  bool searchRegionAndRemove(SimpleList<K*>& result, std::vector<K>& queryLower, std::vector<K>& queryUpper, M* moveTo) {
     // if the tree is not built yet, build it
     if (root == nullptr) {
       buildTree();
@@ -1041,33 +1008,9 @@ public:
     }
 
     // Search the tree and return the resulting list of KdNodes.
-    auto retCode = root->regionSearchAndRemove(retPair, queryLower, queryUpper, maximumSubmitDepth, 0l, permutation);
+    root->regionSearchAndRemove(result, queryLower, queryUpper, moveTo, 0LL, permutation, 1ULL);
     return true;
   }
-
-  bool searchRegionAndRemove(std::list<retPair_t*>& retPair, std::vector<K>& queryLower, std::vector<K>& queryUpper, M* moveTo) {
-    // if the tree is not built yet, build it
-    if (root == nullptr) {
-      buildTree();
-    }
-
-    // Ensure that each query lower bound <= the corresponding query upper bound.
-    for (size_t i = 0; i < queryLower.size(); ++i) {
-      if (queryLower[i] > queryUpper[i]) {
-        K tmp = queryLower[i];
-        queryLower[i] = queryUpper[i];
-        queryUpper[i] = tmp;
-      }
-    }
-
-
-    // Search the tree and return the resulting list of KdNodes.
-    {
-      root->regionSearchAndRemove(retPair, queryLower, queryUpper, moveTo, 0l, permutation);
-    }
-    return true;
-  }
-
 
 
   bool buildTree(signed_size_t numThreads = -1) {
@@ -1075,33 +1018,40 @@ public:
       setNumThreads(numThreads);
     }
     permutation = getPermutations(numPoints, N);
-    root = KdNodePDB::createKdTree(kdNodes, numThreads, maximumSubmitDepth);
+    root = KdNodePDB::createKdTree(kdNodePtrs, numThreads, maximumSubmitDepth);
     return true;
   }
 
+  /*
+  * The pickValue picks a value from the kdTree by descending to the lowest point in the tree that it finds
+  * a node where a value has not been taken yet.
+  * Parameters:
+  *   result:     reference to a list of where to put a pointer to the tuple of the picked point.
+  *   moveTo:     pointer to cluster where that will contain the value picked
 
-  bool pickValue(retPair_t& returnKV, uint64_t selectionBias, M* moveTo) {
+  *   return - a Boolean indicating whether it found a node.
+  **/
+  bool pickValue(SimpleList<K*>& result, uint64_t selectionBias, M* moveTo) {
     // if the tree is not built yet, build it
     if (root == nullptr) {
       buildTree();
       // if root is still null; return a null
       if (root == nullptr) return false;
     }
-    // descent selector
-  // search the tree to find the node to return and possibly delete.
-    returnKV.second = nullptr;
+    // search the tree to find the node to return and possibly delete.
     {
-      SearchRet returnResult = root->pickValue(returnKV, selectionBias, moveTo, 0);
+      SearchRet returnResult = root->pickValue(result, selectionBias, moveTo, 0);
     }
     // Check to see if no data was returned.  If so then return false.
-    if (returnKV.second == nullptr) return false;
+    if (result.size() == 0) return false;
 
     return true;
   }
 
-
   ~KdTreePDB() {
-    root->deleteKdTree();
+    //Note: the KdNodes are deleted when the local simpleAlloc allocator is deleted
+    //std::cout << nodesVisited << " Nodes visited\n";
+    delete adaptorV;
   }
 
 }; // KdTree

@@ -5,22 +5,18 @@
  */
 
 
-// DBSCANtest.cpp : This file contains the a test of the multithreaded DBSCAN code in MTDBSCAN.hpp. 
+// DBSCANtest.cpp : This file contains a test of the multithreaded DBSCAN code in MTDBSCAN.hpp. 
 
-//#define DEBUG_PRINT  // enable this to add debug print messages.  must be defined befor including MTDBSCAN.hpp
 //#define COMPARISON_TEST // enables a full comparison of clusters between the multithreaded DBSCAN and single threaded DBSCAN
-//#define MEASURE_KDTREE_TIME // enables printing of the time to build the k-d tree  which is also included in the total time.
+//#define MEASURE_INDIVIDUAL_TIMES // enables printing of the time to build the k-d tree  which is also included in the total time.
 #include <random>
 #include <chrono>
+#include <thread>
 #include <iomanip>
 #include "MTDBSCAN.hpp"
 #include "avlSet.h"
 #include "ParseArgs.h"
-#define _CRTDBG_MAP_ALLOC
 #include <stdlib.h>
-#ifdef _DEBUG
-#include <crtdbg.h>
-#endif
 #ifdef COMPARISON_TEST
 #include "dbscan.h"
 #endif
@@ -81,7 +77,11 @@ int main(int argc, const char* argv[])
   parseArgs.addHelpPretext("DBSCANtest <args> is a test of the multithreaded DBSCAN code in MTDBSCAN.hpp");
   if (!parseArgs.parse(argc, argv)) exit(1);
   parseArgs.clear();
+
+  int exitCode = 0;
   
+  if (numThreads == -1) numThreads = std::thread::hardware_concurrency();
+
   //std::cout << parseArgs.getValuesString() << std::endl;
   std::cout << "number of clusters = " << numClusters << " number of points per cluster = " << numPointsPer << " cluster span = " << clusterSpan <<
                "\nsearch window = " << searchRad << " threads = " << numThreads << " random number seed = " << rngSeed << std::endl << std::endl;
@@ -125,7 +125,6 @@ int main(int argc, const char* argv[])
   std::chrono::steady_clock::time_point startTime;
   std::chrono::steady_clock::time_point endTime;
 
-
   std::cout << "Running MTDBSCAN clustering algorithm..." << std::endl;
   mtdbscan->setWindow(window);
   mtdbscan->setNumThreads(numThreads);
@@ -134,16 +133,30 @@ int main(int argc, const char* argv[])
   endTime = std::chrono::steady_clock::now();
 
   double totalMtdbscanTime = std::chrono::duration<double>(endTime - startTime).count();
-#ifdef MEASURE_KDTREE_TIME
-  std::cout << "Total MTDBSCAN cluster time: " << std::fixed << std::setprecision(2) << totalMtdbscanTime << " seconds" <<
-    ",  KdTree time: " << mtdbscan->getKdTreeTime() << " seconds." << std::endl << std::endl;
+#ifdef MEASURE_INDIVIDUAL_TIMES
+  std::cout << "Total MTDBSCAN cluster time: " << std::fixed << std::setprecision(4) << totalMtdbscanTime << " seconds.\n" <<
+    "KdTree time: " << mtdbscan->getKdTreeTime() << " seconds" << 
+    ",  Search time: " << mtdbscan->getSearchTime() << " seconds" << 
+    ",  Merge time: " << mtdbscan->getMergeTime() << " seconds" <<
+    ",  copy time: " << mtdbscan->getCopyTime() << " seconds." << 
+    ",  Cleanup time: " << mtdbscan->getCleanupTime() << " seconds.\n" << std::endl;
 #else
-  std::cout << "Total MTDBSCAN cluster time: " << std::fixed << std::setprecision(2) << totalMtdbscanTime << " seconds" << std::endl << std::endl;
+  std::cout << "Total MTDBSCAN cluster time: " << std::fixed << std::setprecision(2) << totalMtdbscanTime << " seconds.\n" << std::endl;
 #endif
+
   if (!mtdbscan->checkClusters(numPoints)) {
+    delete[] coordinates;
+    delete[] clusterCenters;
+    window.clear();
     exit(1);
   }
-
+  if (false) {
+    delete[] coordinates;
+    delete[] clusterCenters;
+    window.clear();
+    exit(1);
+  }
+  
   std::cout << "Checking to see that all values ended up in some cluster" << std::endl;
   
   avlSet<dval_t> valMatch;
@@ -159,6 +172,10 @@ int main(int argc, const char* argv[])
   }
   else {
     std::cout << "ERROR: Failed to find the same set values in the clusters as generated." << std::endl;
+    delete[] coordinates;
+    delete[] clusterCenters;
+    window.clear();
+    exit(1);
   }
   valMatch.clear();
   
@@ -186,17 +203,23 @@ int main(int argc, const char* argv[])
   endTime = std::chrono::steady_clock::now();
 
   double totalDbscanTime = std::chrono::duration<double>(endTime - startTime).count();
-#ifdef MEASURE_KDTREE_TIME
-  std::cout << "Total DBSCAN cluster time: " << std::fixed << std::setprecision(2) << totalDbscanTime << " seconds" <<
-    ",  KdTree time: " << dbscan->getKdTreeTime() << " seconds." << std::endl << std::endl;
+#ifdef MEASURE_INDIVIDUAL_TIMES
+  std::cout << "Total DBSCAN cluster time: " << std::fixed << std::setprecision(4) << totalDbscanTime << " seconds" <<
+    ",  KdTree time: " << dbscan->getKdTreeTime() << " seconds,  search time: " << totalDbscanTime - dbscan->getKdTreeTime() << " seconds." << std::endl << std::endl;
 #else
   std::cout << "Total DBSCAN cluster time = " << std::fixed << std::setprecision(2) << totalDbscanTime << " seconds" << std::endl << std::endl;
 #endif
 
   if (totalMtdbscanTime > totalDbscanTime)
-    std::cout << "WARNING: MTDBSCAN time is greater that DBSCAN time." << std::endl;
+    std::cout << "WARNING: MTDBSCAN time is greater than DBSCAN time." << std::endl;
 
   if (!dbscan->checkClusters(numPoints)) {
+    exit(1);
+  }
+  if (false) {
+    delete[] coordinates;
+    delete[] clusterCenters;
+    window.clear();
     exit(1);
   }
 
@@ -207,9 +230,6 @@ int main(int argc, const char* argv[])
   }
 
   std::cout << "Sorting the contents of all the clusters in MTDBSCAN" << std::endl;
-  //for (size_t i = 0; i < mtdbscan->getNumClusters(); i++) {
-  //  mtdbscan->getClusterValueList(i)->sort();
-  //}
   parallelFor((size_t)0, mtdbscan->getNumClusters(), [&mtdbscan](size_t i) {
     mtdbscan->getClusterValueList(i)->sort();
     });
@@ -218,9 +238,6 @@ int main(int argc, const char* argv[])
   mtdbscan->sortClustersByFirstValue();
 
   std::cout << "Sorting the contents of all the clusters in DBSCAN" << std::endl;
- // for (size_t i = 0; i < dbscan->getNumClusters(); i++) {
- //   dbscan->getClusterValueList(i)->sort();
- // }
   parallelFor((size_t)0, dbscan->getNumClusters(), [&dbscan](size_t i) {
     dbscan->getClusterValueList(i)->sort();
     });
@@ -229,11 +246,10 @@ int main(int argc, const char* argv[])
 
 
   // comparing exact contents
-  // first sort all the contents of each cluster in both cluster results
-  // then, for each cluster in the MTDBSCAN, find a cluster in DBSCAN with the same first element
-  // once a match has been found, check that the entire contents of both match.
+  // First sort all the contents of each cluster in both cluster results
+  // Then, sort the clusters by the first element in each cluster
+  // Now both cluster results should have the values in the sam order so do a linear compare.
   
-  //for (size_t i = 0; i < mtdbscan->getNumClusters(); i++) {
   parallelFor((size_t)0, mtdbscan->getNumClusters(), [&mtdbscan, &dbscan](size_t i) {
     size_t j = i;
     if (*mtdbscan->getClusterValueList(i)->begin() != *dbscan->getClusterValueList(j)->begin()) {
@@ -255,6 +271,7 @@ int main(int argc, const char* argv[])
       }
     }
 
+    // now make sure the bounds of each cluster match
     auto MTDBSCANmin = mtdbscan->getClusterMinCorner(i);
     auto MTDBSCANmax = mtdbscan->getClusterMaxCorner(i);
     auto dbscanmin = dbscan->getClusterMinCorner(j);
@@ -278,7 +295,6 @@ int main(int argc, const char* argv[])
 
 #endif
   delete mtdbscan;
-
   bool doSortTest = true;
   if (doSortTest) {
     std::cout << "Starting sorting test of a small 5 cluster case." << std::endl;
@@ -306,10 +322,6 @@ int main(int argc, const char* argv[])
   delete[] clusterCenters;
   window.clear();
 
-#ifdef _DEBUG
-  _CrtSetReportMode(_CRT_WARN, _CRTDBG_MODE_DEBUG);
-  _CrtDumpMemoryLeaks();
-#endif
   exit(0);
 
 }
