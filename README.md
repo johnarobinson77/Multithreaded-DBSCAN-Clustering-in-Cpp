@@ -83,18 +83,18 @@ The following files are needed to implement multithreaded DBSCAN in your code.
 
 **MTDBSCAN.hpp** holds the MTDBSCAN class definition. The DBSCAN algorithm is performed in the build function there.
 
-**KdTreePDB.hpp** contains the KdTree class and the KdNode class. The KdTreePDB class is an API wrapper around the KdNode class. The KdNode class implements the building of the k-d tree using the Knlogn algorithm. The algorithm description for building a k-d tree and original code can be found at [https://github.com/chezruss/kd-tree](https://github.com/chezruss/kd-tree). Much of the code in the KdNode class for building the k-d tree is taken directly from that code base. The search code in the KdNode class was rewritten to accelerate the particular problem of multithreaded DBSCAN,
+**KdTreePDB.hpp** contains the KdTree class and the KdNode class. The KdTreePDB class is an API wrapper around the KdNode class. The KdNode class implements the building of the k-d tree using the Knlogn algorithm. The algorithm description for building a k-d tree and original code can be found at [https://github.com/RussellABrown/kd-tree](https://github.com/RussellABrown/kd-tree). Much of the code in the KdNode class for building the k-d tree is taken directly from that code base. The search code in the KdNode class was rewritten to accelerate the particular problem of multithreaded DBSCAN,
 
 **ParallelSort.hpp, and ParallelFor.hpp** contain code for sorting in parallel. It is used in the kdTree build code as well as the cluster size sort function.
 
 **SimpleContainers.h**  provides set, list, and memory allocator classes that are faster and take less memory than the STL versions for this particular use case.
 
-**avlSet.h** avlSet.h[3] is a slightly modified version of avlTree.cpp that can be found at [https://github.com/chezruss/avl-tree](https://github.com/chezruss/avl-tree).
+**avlSet.h** avlSet.h[3] is a slightly modified version of avlTree.cpp that can be found at [https://github.com/RussellABrown/avl-tree](https://github.com/RussellABrown/avl-tree).
 
 ### Test files
 The following files are provided to test the multithreaded DBSCAN code and are not needed to implement this DBSCAN package implementation in your code.
 
-**DBSCANtest.cpp** provides an example of usage and, a test case for the DBSCAN implementation. The default test case is 1600 artificially clustered data with 4000 points per cluster. That data is presented to MTDBSCAN. The results should, therefore, end up with a Clusters list that is 1600 in size, and clusters will have an average of 4000 values. The parameters of the clustering can be overridden using command line arguments. Start with -h.  This file is not necessary other than to test the MTDBSCAN class. Compile with -std=c++17.
+**DBSCANtest.cpp** provides an example of usage and a test case for the DBSCAN implementation. The default test case is 1600 artificially clustered data with 4000 points per cluster. That data is presented to MTDBSCAN. The results should, therefore, end up with a Clusters list that is 1600 in size, and clusters will have an average of 4000 values. The parameters of the clustering can be overridden using command line arguments. Start with -h.  This file is not necessary other than to test the MTDBSCAN class. Compile with -std=c++17.
 
 **ParseArgs.h** is my attempt at providing a general command line parser.  It is used in DBSCANtest.  This file is not necessary other than to test the MTDBSCAN class.
 
@@ -202,12 +202,12 @@ The picker function that provides a seed point for a new cluster has a selection
 ### Limiting k-d tree Search Depth
 The nature of searching the k-d tree for points to add to the cluster is such that nodes in the tree will be visited multiple times unless something is done to mitigate those multiple visits.  If it is known at a node in the k-d tree that this node and all the nodes below on both child branches have already been added to this cluster, there is no need to search those branches again.
 
-To achieve this, each cluster generated has a unique ID assigned at construction time.  Each k-d tree node contains a set called the AllVisited set.  During the recursive search, when a node is found to include the point in that node, the cluster ID is added to the node's AllVisited set but only if the two child nodes have that ID in their set.  On return to the parent node, the return code indicates whether it is an AllVisited node for this cluster.
+To achieve this, each cluster generated has a unique ID assigned at construction time.  Each k-d tree node contains a set called the AllVisited set.  During the recursive search, when a node is found to include the point in that node, the cluster ID is added to the node's AllVisited set, but only if the two child nodes have that ID in their set.  On return to the parent node, the return code indicates whether it is an AllVisited node for this cluster.
 
 On the downward traversal of subsequent searches, when the thread finds the cluster-ID it is working on in the AllVisited set, it returns without going down that tree branch.  This goes a long way to keep the k-d tree cluster search from being N^2 complexity. 
 
 ### Memory Allocation
-For the purposes of building the clusters, the k-d tree is an intermediate data structure that is destroyed at the end of the cluster-building process.  The k-d tree will contain a k node for each point added to the MTDBSCAN.  So for a large data set, the temporary memory taken by the k-d tree can be quite large, but worse it is allocated in small chunks, which are the node's size.
+For the purposes of building the clusters, the k-d tree is an intermediate data structure that is destroyed at the end of the cluster-building process.  The k-d tree will contain a k node for each point added to the MTDBSCAN.  So, for a large data set, the temporary memory taken by the k-d tree can be quite large, but worse, it is allocated in small chunks, which are the node's size.
 
 During performance tuning, I found that the time to delete all the nodes in the k-d tree was substantial.  I believe that this was due to the memory allocator having to coalesce all the small per-node allocations.  On some systems, such as in MSVC, that process took place at the time the node destructor was called.  On other systems, such as g++ on Ubuntu, the coalescing seemed to happen in two parts, first when the node destructor was called and then again when a new large container, such as a std::vector, was allocated.
 
@@ -234,6 +234,9 @@ The number of threads vs. time Figures shows the processing time and the result 
      t<sub>1</sub> is the time to execute parallelizable code  
      t<sub>C</sub> is the time loss due to contention between threads.  
      q is the number of threads
+
+The theoretical number of threads that results in the  fastest execution time can be calculated from the model using the equation:
+> q<sub>M</sub> = sqrt( t<sub>1</sub>/t<sub>C</sub>)
 
 A more complete description of the Amdahl model can be found in in section 6.10 in Reference [2] below. 
 
@@ -262,12 +265,12 @@ Figure 4 shows the performance vs number of threads for a 6.4 million point data
 **<p align="center">Figure 4. 16 Cluster Performance</p>**
 
 ## Thanks
-Thanks to Russel Brown for providing the figures with the Amdahl Model curves. 
+Thanks to Russell Brown for providing the figures with the Amdahl Model figures. 
 
 ## References
 [1] Ester, Martin; Kriegel, Hans-Peter; Sander, Jörg; Xu, Xiaowei (1996). Simoudis, Evangelos; Han, Jiawei; Fayyad, Usama M. (eds.). A density-based algorithm for discovering clusters in large spatial databases with noise. Proceedings of the Second International Conference on Knowledge Discovery and Data Mining (KDD-96). AAAI Press. pp. 226–231. CiteSeerX 10.1.1.121.9220. ISBN 1-57735-004-9.
 
-[2] Russell A. Brown, Building a Balanced k-d Tree in O(kn log n) Time, [arXiv:1410.5420v45](https://arxiv.org/abs/1410.5420v45) [cs.DS] .
+[2] Russell A. Brown, Building a Balanced k-d Tree in O(kn log n) Time, [arXiv:1410.5420v45](https://arxiv.org/abs/1410.5420v45) [cs.DS].
 
-[3] Code for the avlSet was provided by Russell A. Brown from his repository at https://github.com/chezruss/avl-tree
+[3] Code for the avlSet was provided by Russell A. Brown from his repository at [https://github.com/RussellABrown/avl-tree](https://github.com/RussellABrown/avl-tree)
 
