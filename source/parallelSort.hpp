@@ -79,7 +79,7 @@
       if (pred) begin = mid + 1;
       else end = mid;
     }
-    return begin;
+    return minimum(begin, aCount);
   }
 
   // Divide the output of the merge into #-of-threads equal segments and determine the elements of valA and valB below each segment boundary. 
@@ -143,7 +143,7 @@
   }
 
 //#define BALANCED_MULTITHREADING
-#ifdef BALANCED_MULTITHREADING
+#ifdef NEBER_USE_BALANCED_MULTITHREADING
 
 #pragma message ("Compiling  BALANCED_MULTITHREADING mode")
 
@@ -220,7 +220,7 @@
 
 #else 
 
-#pragma message ("Compiling MINIMIZED_THREAD_LAUNCH mode")
+//#pragma message ("Compiling MINIMIZED_THREAD_LAUNCH mode")
 
   template< class RandomIt, class CF>
   void parallelSort(RandomIt begin, RandomIt end, CF compFunc, size_t threads = 0) {
@@ -231,7 +231,7 @@
 
     // The current code fails if the number of elements is small relative to the number of threads.
     // So limit the number of threads to 1 for small sort cases.
-    if (len < 100) threads = 1;
+    if (len < 128) threads = 1;
 
     // calculate the fractional size of each segment to sort.
     // calculating the arry segments using doubles results in segment sizes where the max segment size
