@@ -32,7 +32,7 @@ using fmt::format
 /*       <type> valPtr is a pointer to a user variable to be modified by the command line arg     */
 /*       bool req is an optional flag which if true indicates this argment or switch is required. */
 /* 3a) Optionally add a lambda that performs some check on the value of the argument. The lambda  */
-/*     is of type void and should take as input, a pointer to the variable provided in step 3. If */ 
+/*     is of type void and should take as input, a pointer to the variable provided in step 3. If */
 /*     the check fails, the lambda should throw any std::exception with text explaining the error.*/
 /*     check fails, the lambda should throw any std::exception with text explaining the error.    */
 /*     addCheck(const char* argName, std::function<void(<type>*)> check)                          */
@@ -45,15 +45,22 @@ using fmt::format
 /*       if parse() returns true then no errors we found.                                         */
 /*       if parse() returns false, then the program should clean up and exit().                   */
 /*                                                                                                */
-/* The argument types are of the form arg=value.  That is, the switch or argment name is almost   */
-/* always separated from the value with an '=' character.  The one exception is that a boolean    */
-/* switch without a value will set the boolean variable to true.  Also there is one predefined    */
-/* switch -h which will print the list of user defined switches with the provided descriptions.   */
+/* Regardless of how the arguments types defined, the user can enter the arguments in 2 formats:  */
+/* 1. the command line switch and value separated by a space                                      */
+/* 2. the command line switch and value separated by and '='                                      */
+/* However a boolean switch without a value will set the boolean variable to true.                */
+/* Also there is one predefined switch -h which will print the list of user defined switches      */
+/* with the provided descriptions.                                                                */
+/* The integer and real values can be an equation which will be evaluated and the result will     */
+/* copied copied to the variable.  The equation is evaluated using standard order ans precedence  */
+/* rules. Operators include + - * / % and ^.  Parentheses can be used to change calculation order.*/
+/* For the integer  type, the numbers can be entered as binary, octal or hex by prefixing the     */
+/* number with '0b', '0' or '0x' respectively. Otherwise the number is interpreted as decimal.    */
 /*                                                                                                */
 /* Example:                                                                                       */
 /*        :                                                                                       */
 /*        :                                                                                       */
-/* #include "ParseArgs.h"                                                                         */ 
+/* #include "ParseArgs.h"                                                                         */
 /*                                                                                                */
 /* int main(int argc, char* argv[]) {                                                             */
 /*                                                                                                */
@@ -86,17 +93,194 @@ using fmt::format
 /*   std::cout << parseArgs.getValuesString();                                                    */
 /*                                                                                                */
 /*   // Since arg parsing is done, the data in parseArgs can optionally be deleted to save space. */
-/*   parseArgs.clear();                                                                         */
+/*   parseArgs.clear();                                                                           */
 /*   return 0;                                                                                    */
 /* }                                                                                              */
 /*                                                                                                */
 /* Compilation of ParsArgs.h requires c++20                                                       */
-/* The above example would parse the next line with no errors.                                    */
+/*                                                                                                */
+/* The above example would parse the next 4 lines with without error.                             */
+/* -a -b=false -i 5 "-r 6.7 -s abc -vb true,true                                                  */
 /* -a -b=false -i=5 "-r=6.7 -s=abc -vb=true,true                                                  */
+/* -a -b=false -i=3+2 "-r=(10+3.4)/2 -s=abc -vb=true,true                                         */
+/* -a -b=false -i=0b101 "-r=(10+3.4)/2 -s=abc -vb=true,true                                       */
 /**************************************************************************************************/
 
+
+class ParseEq {
+public:
+  static double parseRealEquation(const std::string_view& in, size_t& strIdx, size_t precedence, int64_t& parenCnt) {
+    double currentValue = 0;
+    std::string digits;
+
+    // skip over leading spaces
+    while (strIdx < in.length() && in[strIdx] == ' ') {
+      strIdx++;
+    }
+    // then check for open paren and push 
+    if (strIdx < in.length() && in[strIdx] == '(') {
+      strIdx++;
+      parenCnt++;
+      currentValue = handleParen(in, strIdx, 0, parenCnt);
+    }
+    else { // else must be a number
+      digits = in.substr(strIdx);
+      size_t numDigits = 0;
+      currentValue = std::stod(digits, &numDigits);
+      strIdx += numDigits;
+    }
+
+    // next process an operator.
+    while (strIdx < in.length()) {
+
+      if (in[strIdx] == '+' || in[strIdx] == '-') {
+        if (precedence >= 1) return currentValue;
+        char op = in[strIdx++];
+        double returnValue = parseRealEquation(in, strIdx, 1, parenCnt);
+        if (op == '+') currentValue += returnValue;
+        else currentValue -= returnValue;
+        continue;
+      }
+
+      if (in[strIdx] == '*' || in[strIdx] == '/') {
+        if (precedence >= 2) return currentValue;
+        char op = in[strIdx++];
+        double returnValue = parseRealEquation(in, strIdx, 2, parenCnt);
+        if (op == '*') currentValue *= returnValue;
+        else if (op == '/') currentValue /= returnValue;
+        continue;
+      }
+
+      if (in[strIdx] == '^') {
+        if (precedence >= 3) return currentValue;
+        char op = in[strIdx++];
+        double returnValue = parseRealEquation(in, strIdx, 2, parenCnt);
+        if (op == '^') currentValue = std::pow(currentValue, returnValue);
+        continue;
+      }
+
+      if (in[strIdx] == ')') {
+        if (parenCnt <= 0)
+          throw std::invalid_argument("mismatched parentheses");
+        return currentValue;
+      }
+
+      if (in[strIdx] == ' ') {
+        strIdx++; // skip over spaces
+        continue;
+      }
+
+      throw std::invalid_argument("unexpected character");
+      strIdx++;
+    }
+    return(currentValue);
+  }
+
+  static double handleParen(const std::string_view& in, size_t& strIdx, size_t precedence, int64_t& parenCnt) {
+    double currentValue = parseRealEquation(in, strIdx, 0, parenCnt);
+    if (strIdx < in.length() && in[strIdx] == ')') parenCnt--;
+    strIdx++;
+    return currentValue;
+  }
+
+  static int64_t parseIntEquation(const std::string_view& in, size_t& strIdx, size_t precedence, int64_t& parenCnt) {
+    int64_t currentValue = 0;
+    std::string digits;
+
+    // skip over leading spaces
+    while (strIdx < in.length() && in[strIdx] == ' ') {
+      strIdx++;
+    }
+    // then check for open paren and push 
+    if (strIdx < in.length() && in[strIdx] == '(') { 
+      strIdx++;
+      parenCnt++;
+      currentValue = handleIntParen(in, strIdx, 0, parenCnt);
+    }
+    else { // else must be a number
+      int radix= 0;
+      if (strIdx < in.length() && in[strIdx] == '0') { // is radix other than 10?
+        strIdx++;
+        if (strIdx < in.length() && (in[strIdx] == 'b' || in[strIdx] == 'B')) { //is radix binary?
+          radix = 2;
+          strIdx++;
+        }
+        else if (strIdx < in.length() && (in[strIdx] == 'x' || in[strIdx] == 'X')) { //is radix hex? 
+          radix = 16;
+          strIdx++;
+        }
+        else { // then must be octal
+          radix = 8;
+        }
+      }
+      else { // then radix must be 10
+        radix = 10;
+      }
+      digits = in.substr(strIdx);
+      size_t numDigits = 0;
+      currentValue = std::stoll(digits, &numDigits, radix);
+      strIdx += numDigits;
+    }
+
+    // next process an operator.
+    while (strIdx < in.length()) {
+
+      if (in[strIdx] == '+' || in[strIdx] == '-') {
+        if (precedence >= 1) return currentValue;
+        char op = in[strIdx++];
+        int64_t returnValue = parseIntEquation(in, strIdx, 1, parenCnt);
+        if (op == '+') currentValue += returnValue;
+        else currentValue -= returnValue;
+        continue;
+      }
+
+      if (in[strIdx] == '*' || in[strIdx] == '/' || in[strIdx] == '%') {
+        if (precedence >= 2) return currentValue;
+        char op = in[strIdx++];
+        int64_t returnValue = parseIntEquation(in, strIdx, 2, parenCnt);
+        if (op == '*') currentValue *= returnValue;
+        else if (op == '/') currentValue /= returnValue;
+        else if (op == '%') currentValue %= returnValue;
+        continue;
+      }
+
+      if (in[strIdx] == '^') {
+        if (precedence >= 3) return currentValue;
+        char op = in[strIdx++];
+        int64_t returnValue = parseIntEquation(in, strIdx, 2, parenCnt);
+        if (op == '^') currentValue = (int64_t)std::pow(currentValue, returnValue);
+        continue;
+      }
+
+      if (in[strIdx] == ')') {
+        if (parenCnt <= 0)
+          throw std::invalid_argument("mismatched parentheses");
+        return currentValue;
+      }
+
+      if (in[strIdx] == ' ') {
+        strIdx++; // skip over spaces
+        continue;
+      }
+
+      throw std::invalid_argument("unexpected character");
+      strIdx++;
+    }
+    return(currentValue);
+  }
+
+  static int64_t handleIntParen(const std::string_view& in, size_t& strIdx, size_t precedence, int64_t& parenCnt) {
+    int64_t currentValue = parseIntEquation(in, strIdx, 0, parenCnt);
+    if (strIdx < in.length() && in[strIdx] == ')') parenCnt--;
+    strIdx++;
+    return currentValue;
+  }
+
+};
+
+
 class ParseArgs {
- 
+
   /*** ArgBase is base struct for structs that hold information about the specific arguments ***/
   struct ArgBase {
     const char* argName;      // name of the argument or switch
@@ -105,7 +289,7 @@ class ParseArgs {
     bool found;               // Boolean indicating if this switch was found during parsing
 
     ArgBase(const char* arg, const char* desc, bool req) : argName{ arg }, description{ desc }, required{ req }, found{ false } {}
-    
+
     virtual void  parse(std::string_view s) = 0;
     virtual std::string toString() = 0;
     virtual std::string type() = 0;
@@ -118,7 +302,7 @@ class ParseArgs {
     std::function<void(bool*)> check = nullptr; // pointer to a potential value check
 
     ArgBool(const char* arg, const char* desc, bool* valPtr, bool req) : ArgBase(arg, desc, req), value{ valPtr } {} // constructor
-    
+
     void parse(std::string_view s) override {  // parse for the specific type
       if (s == "")
         *value = true;
@@ -142,18 +326,21 @@ class ParseArgs {
 
     ArgInt(const char* arg, const char* desc, int64_t* const valPtr, bool req) : ArgBase(arg, desc, req), value{ valPtr } {
     }
-    
+
     void parse(std::string_view s) override {
       if (s == "")
         throw std::invalid_argument("Must include an integer value");
       else {
-        size_t last_c = 0;
-        *value = std::stoll(std::string(s), &last_c);
-        if (last_c != s.size())
-          throw std::invalid_argument("Must include an integer value");
-        if (check != nullptr) check (value);
+        size_t strIdx = 0;
+        int64_t parenCount = 0;
+        *value = ParseEq::parseIntEquation(std::string(s), strIdx, 0, parenCount);
+        if (parenCount != 0)
+          throw std::invalid_argument("mismatched parentheses");
+        else if (strIdx != s.length())
+          throw std::invalid_argument("parse error");
+        if (check != nullptr) check(value);
+      }
     }
-  }
 
     std::string toString() override { return std::to_string(*value); }
 
@@ -171,14 +358,17 @@ class ParseArgs {
       if (s == "")
         throw std::invalid_argument(std::string("Must include a real number value"));
       else {
-        size_t last_c = 0;
-        *value = std::stod(std::string(s), &last_c);
-        if (last_c != s.size())
-          throw std::invalid_argument("Must include a real number value");
+        size_t strIdx = 0;
+        int64_t parenCount = 0;
+        *value = ParseEq::parseRealEquation(s, strIdx, 0, parenCount);
+        if (parenCount != 0)
+          throw std::invalid_argument("mismatched parentheses");
+        else if (strIdx != s.length())
+          throw std::invalid_argument("parse error");
+        if (check != nullptr) check(value);
       }
-      if (check != nullptr) check(value);
     }
-    
+
     std::string toString() override { return std::to_string(*value); }
 
     std::string type() override { return "real number"; }
@@ -190,7 +380,7 @@ class ParseArgs {
     std::function<void(std::string_view*)> check = nullptr;
 
     ArgText(const char* arg, const char* desc, std::string_view* const valPtr, bool req) : ArgBase(arg, desc, req), value{ valPtr } {}
-    
+
     void parse(std::string_view s) override {
       if (s == "")
         throw std::invalid_argument("Must include a text value");
@@ -228,7 +418,7 @@ public:
   void addCheck(const char* argName, std::function<void(int64_t*)> check) {
     addCheckT<ArgInt, int64_t>(argName, check);
   }
-  
+
   /** These addArg member functions build and modify an ArgReal objects **/
   void addArg(const char* arg, const char* desc, double* const valPtr, bool req = false) {
     addArgT<ArgReal, double>(arg, desc, valPtr, req);
@@ -252,294 +442,294 @@ public:
   }
 
 #ifndef REMOVE_VECTOR_ARGUMENT_CODE
-  private:
+private:
 
-    /**** ArgBoolArray holds information about specific boolean array arguments ****/
-    struct ArgBoolArray : ArgBase {
-      std::vector<bool>* const values;
-      std::function<void(std::vector<bool>*)> check = nullptr; // pointer to a potential value check
+  /**** ArgBoolArray holds information about specific boolean array arguments ****/
+  struct ArgBoolArray : ArgBase {
+    std::vector<bool>* const values;
+    std::function<void(std::vector<bool>*)> check = nullptr; // pointer to a potential value check
 
-      ArgBoolArray(const char* arg, const char* desc, std::vector<bool>* valPtr, bool req) : ArgBase(arg, desc, req), values{ valPtr } {}
+    ArgBoolArray(const char* arg, const char* desc, std::vector<bool>* valPtr, bool req) : ArgBase(arg, desc, req), values{ valPtr } {}
 
-      void parse(std::string_view s) override {
-        if (s == "")
-          throw std::invalid_argument("Must include a list of boolean values");
-        else {
-          auto pVals = split(s, ',');
-          size_t len = values->size();
-          if (pVals.size() != len)
-            throw std::invalid_argument("Number of values doesn't match array size of " + std::to_string(len));
-          for (int idx = 0; idx < len; idx++) {
-            if (pVals[idx] == "true")
-              values->at(idx) = true;
-            else if (pVals[idx] == "false")
-              values->at(idx) = false;
-            else throw std::invalid_argument("Boolean values must be 'true' or 'false'");
-          }
+    void parse(std::string_view s) override {
+      if (s == "")
+        throw std::invalid_argument("Must include a list of boolean values");
+      else {
+        auto pVals = split(s, ',');
+        size_t len = values->size();
+        if (pVals.size() != len)
+          throw std::invalid_argument("Number of values doesn't match array size of " + std::to_string(len));
+        for (int idx = 0; idx < len; idx++) {
+          if (pVals[idx] == "true")
+            values->at(idx) = true;
+          else if (pVals[idx] == "false")
+            values->at(idx) = false;
+          else throw std::invalid_argument("Boolean values must be 'true' or 'false'");
         }
-        if (check != nullptr) check(values);
       }
+      if (check != nullptr) check(values);
+    }
 
-      std::string toString() override {
-        std::string tmp;
-        for (int i = 0; i < values->size(); i++) {
-          if (i != 0)  tmp += ',';
-          tmp += values->at(i) ? "true" : "false";
+    std::string toString() override {
+      std::string tmp;
+      for (int i = 0; i < values->size(); i++) {
+        if (i != 0)  tmp += ',';
+        tmp += values->at(i) ? "true" : "false";
+      }
+      return tmp;
+    }
+
+    std::string type() override { return "boolean array"; }
+  };
+
+  /**** ArgIntArray holds information about specific integer array arguments ****/
+  struct ArgIntArray : ArgBase {
+    std::vector<int64_t>* const values;
+    std::function<void(std::vector<int64_t>*)> check = nullptr; // pointer to a potential value check
+
+    ArgIntArray(const char* arg, const char* desc, std::vector<int64_t>* valPtr, bool req) : ArgBase(arg, desc, req), values{ valPtr } {}
+
+    void parse(std::string_view s) override {
+      if (s == "")
+        throw std::invalid_argument("Must include a list of integer values");
+      else {
+        auto pVals = split(s, ',');
+        size_t len = values->size();
+        if (pVals.size() != len)
+          throw std::invalid_argument("Number of values doesn't match array size of " + std::to_string(len));
+        for (int idx = 0; idx < len; idx++) {
+          size_t last_c = 0;
+          values->at(idx) = std::stoll(std::string(pVals[idx]), &last_c);
+          if (last_c != pVals[idx].size())
+            throw std::invalid_argument("Must include integer number values");
         }
-        return tmp;
       }
+      if (check != nullptr) check(values);
+    }
 
-      std::string type() override { return "boolean array"; }
-    };
+    std::string toString() override {
+      std::string tmp;
+      for (int i = 0; i < values->size(); i++) {
+        if (i != 0)  tmp += ',';
+        tmp += std::to_string(values->at(i));
+      }
+      return tmp;
+    }
 
-    /**** ArgIntArray holds information about specific integer array arguments ****/
-    struct ArgIntArray : ArgBase {
-      std::vector<int64_t>* const values;
-      std::function<void(std::vector<int64_t>*)> check = nullptr; // pointer to a potential value check
+    std::string type() override { return "integer array"; }
+  };
 
-      ArgIntArray(const char* arg, const char* desc, std::vector<int64_t>* valPtr, bool req) : ArgBase(arg, desc, req), values{ valPtr } {}
+  /**** ArgRealArray holds information about specific integer array arguments ****/
+  struct ArgRealArray : ArgBase {
+    std::vector<double>* const values;
+    std::function<void(std::vector<double>*)> check = nullptr; // pointer to a potential value check
 
-      void parse(std::string_view s) override {
-        if (s == "")
-          throw std::invalid_argument("Must include a list of integer values");
-        else {
-          auto pVals = split(s, ',');
-          size_t len = values->size();
-          if (pVals.size() != len)
-            throw std::invalid_argument("Number of values doesn't match array size of " + std::to_string(len));
-          for (int idx = 0; idx < len; idx++) {
-            size_t last_c = 0;
-            values->at(idx) = std::stoll(std::string(pVals[idx]), &last_c);
-            if (last_c != pVals[idx].size())
-              throw std::invalid_argument("Must include integer number values");
-          }
+    ArgRealArray(const char* arg, const char* desc, std::vector<double>* valPtr, bool req) : ArgBase(arg, desc, req), values{ valPtr } {}
+
+    void parse(std::string_view s) override {
+      if (s == "")
+        throw std::invalid_argument("Must include a list of real values");
+      else {
+        auto pVals = split(s, ',');
+        size_t len = values->size();
+        if (pVals.size() != len)
+          throw std::invalid_argument("Number of values doesn't match array size of " + std::to_string(len));
+        for (int idx = 0; idx < len; idx++) {
+          size_t last_c = 0;
+          values->at(idx) = std::stod(std::string(pVals[idx]), &last_c);
+          if (last_c != pVals[idx].size())
+            throw std::invalid_argument("Must include a real number values");
         }
-        if (check != nullptr) check(values);
       }
+      if (check != nullptr) check(values);
+    }
 
-      std::string toString() override {
-        std::string tmp;
-        for (int i = 0; i < values->size(); i++) {
-          if (i != 0)  tmp += ',';
-          tmp += std::to_string(values->at(i));
+    std::string toString() override {
+      std::string tmp;
+      for (int i = 0; i < values->size(); i++) {
+        if (i != 0)  tmp += ',';
+        tmp += std::to_string(values->at(i));
+      }
+      return tmp;
+    }
+
+    std::string type() override { return "real array"; }
+  };
+
+  /**** ArgTextArray holds information about specific text array arguments ****/
+  struct ArgTextArray : ArgBase {
+    std::vector<std::string_view>* const values;
+    std::vector<std::string> localValues;
+    std::function<void(std::vector<std::string_view>*)> check = nullptr; // pointer to a potential value check
+
+    ArgTextArray(const char* arg, const char* desc, std::vector<std::string_view>* valPtr, bool req) : ArgBase(arg, desc, req), values{ valPtr } {}
+
+    void parse(std::string_view s) override {
+      if (s == "")
+        throw std::invalid_argument("Must include a list of text values");
+      else {
+        auto pVals = split(s, ',');
+        size_t len = values->size();
+        if (pVals.size() != len)
+          throw std::invalid_argument("Number of values doesn't match array size of " + std::to_string(len));
+        for (int idx = 0; idx < len; idx++) {
+          values->at(idx) = pVals[idx];
         }
-        return tmp;
       }
+      if (check != nullptr) check(values);
+    }
 
-      std::string type() override { return "integer array"; }
-    };
-
-    /**** ArgRealArray holds information about specific integer array arguments ****/
-    struct ArgRealArray : ArgBase {
-      std::vector<double>* const values;
-      std::function<void(std::vector<double>*)> check = nullptr; // pointer to a potential value check
-
-      ArgRealArray(const char* arg, const char* desc, std::vector<double>* valPtr, bool req) : ArgBase(arg, desc, req), values{ valPtr } {}
-
-      void parse(std::string_view s) override {
-        if (s == "")
-          throw std::invalid_argument("Must include a list of real values");
-        else {
-          auto pVals = split(s, ',');
-          size_t len = values->size();
-          if (pVals.size() != len)
-            throw std::invalid_argument("Number of values doesn't match array size of " + std::to_string(len));
-          for (int idx = 0; idx < len; idx++) {
-            size_t last_c = 0;
-            values->at(idx) = std::stod(std::string(pVals[idx]), &last_c);
-            if (last_c != pVals[idx].size())
-              throw std::invalid_argument("Must include a real number values");
-          }
-        }
-        if (check != nullptr) check(values);
+    std::string toString() override {
+      std::string tmp;
+      for (int i = 0; i < values->size(); i++) {
+        if (i != 0)  tmp += ',';
+        tmp += '"' + std::string(values->at(i)) + '"';
       }
-
-      std::string toString() override {
-        std::string tmp;
-        for (int i = 0; i < values->size(); i++) {
-          if (i != 0)  tmp += ',';
-          tmp += std::to_string(values->at(i));
-        }
-        return tmp;
-      }
-
-      std::string type() override { return "real array"; }
-    };
-
-    /**** ArgTextArray holds information about specific text array arguments ****/
-    struct ArgTextArray : ArgBase {
-      std::vector<std::string_view>* const values;
-      std::vector<std::string> localValues;
-      std::function<void(std::vector<std::string_view>*)> check = nullptr; // pointer to a potential value check
-
-      ArgTextArray(const char* arg, const char* desc, std::vector<std::string_view>* valPtr, bool req) : ArgBase(arg, desc, req), values{ valPtr } {}
-
-      void parse(std::string_view s) override {
-        if (s == "")
-          throw std::invalid_argument("Must include a list of text values");
-        else {
-         auto pVals = split(s, ',');
-          size_t len = values->size();
-          if (pVals.size() != len)
-            throw std::invalid_argument("Number of values doesn't match array size of " + std::to_string(len));
-          for (int idx = 0; idx < len; idx++) {
-            values->at(idx) = pVals[idx];
-          }
-        }
-        if (check != nullptr) check(values);
-      }
-
-      std::string toString() override {
-        std::string tmp;
-        for (int i = 0; i < values->size(); i++) {
-          if (i != 0)  tmp += ',';
-          tmp += '"' + std::string(values->at(i)) + '"';
-        }
-        return tmp;
-      }
-
-      std::string type() override { return "text array"; }
-    };
-
-  public:
-    /** These addArg member functions build and modify an ArgBoolArray objects **/
-    void addArg(const char* arg, const char* desc, std::vector<bool>* const valPtr, bool req = false) {
-      addArgT<ArgBoolArray, std::vector<bool>>(arg, desc, valPtr, req);
-    }
-    void addCheck(std::function<void(std::vector<bool>*)> check) {
-      addCheckT<ArgBoolArray, std::vector<bool>>(check);
-    }
-    void addCheck(const char* argName, std::function<void(std::vector<bool>*)> check) {
-      addCheckT<ArgBoolArray, std::vector<bool>>(argName, check);
+      return tmp;
     }
 
-    /** These addArg member functions build and modify an ArgIntArray objects **/
-    void addArg(const char* arg, const char* desc, std::vector<int64_t>* const valPtr, bool req = false) {
-      addArgT<ArgIntArray, std::vector<int64_t>>(arg, desc, valPtr, req);
-    }
-    void addCheck(std::function<void(std::vector<int64_t>*)> check) {
-      addCheckT<ArgIntArray, std::vector<int64_t>>(check);
-    }
-    void addCheck(const char* argName, std::function<void(std::vector<int64_t>*)> check) {
-      addCheckT<ArgIntArray, std::vector<int64_t>>(argName, check);
-    }
+    std::string type() override { return "text array"; }
+  };
 
-    /** These addArg member functions build and modify an ArgRealArray objects **/
-    void addArg(const char* arg, const char* desc, std::vector<double>* const valPtr, bool req = false) {
-      addArgT<ArgRealArray, std::vector<double>>(arg, desc, valPtr, req);
-    }
-    void addCheck(std::function<void(std::vector<double>*)> check) {
-      addCheckT<ArgRealArray, std::vector<double>>(check);
-    }
-    void addCheck(const char* argName, std::function<void(std::vector<double>*)> check) {
-      addCheckT<ArgRealArray, std::vector<double>>(argName, check);
-    }
+public:
+  /** These addArg member functions build and modify an ArgBoolArray objects **/
+  void addArg(const char* arg, const char* desc, std::vector<bool>* const valPtr, bool req = false) {
+    addArgT<ArgBoolArray, std::vector<bool>>(arg, desc, valPtr, req);
+  }
+  void addCheck(std::function<void(std::vector<bool>*)> check) {
+    addCheckT<ArgBoolArray, std::vector<bool>>(check);
+  }
+  void addCheck(const char* argName, std::function<void(std::vector<bool>*)> check) {
+    addCheckT<ArgBoolArray, std::vector<bool>>(argName, check);
+  }
 
-    /** These addArg member functions build and modify an ArgBoolArray objects **/
-    void addArg(const char* arg, const char* desc, std::vector<std::string_view>* const valPtr, bool req = false) {
-      addArgT<ArgTextArray, std::vector<std::string_view>>(arg, desc, valPtr, req);
-    }
-    void addCheck(std::function<void(std::vector<std::string_view>*)> check) {
-      addCheckT<ArgTextArray, std::vector<std::string_view>>(check);
-    }
-    void addCheck(const char* argName, std::function<void(std::vector<std::string_view>*)> check) {
-      addCheckT<ArgTextArray, std::vector<std::string_view>>(argName, check);
-    }
+  /** These addArg member functions build and modify an ArgIntArray objects **/
+  void addArg(const char* arg, const char* desc, std::vector<int64_t>* const valPtr, bool req = false) {
+    addArgT<ArgIntArray, std::vector<int64_t>>(arg, desc, valPtr, req);
+  }
+  void addCheck(std::function<void(std::vector<int64_t>*)> check) {
+    addCheckT<ArgIntArray, std::vector<int64_t>>(check);
+  }
+  void addCheck(const char* argName, std::function<void(std::vector<int64_t>*)> check) {
+    addCheckT<ArgIntArray, std::vector<int64_t>>(argName, check);
+  }
+
+  /** These addArg member functions build and modify an ArgRealArray objects **/
+  void addArg(const char* arg, const char* desc, std::vector<double>* const valPtr, bool req = false) {
+    addArgT<ArgRealArray, std::vector<double>>(arg, desc, valPtr, req);
+  }
+  void addCheck(std::function<void(std::vector<double>*)> check) {
+    addCheckT<ArgRealArray, std::vector<double>>(check);
+  }
+  void addCheck(const char* argName, std::function<void(std::vector<double>*)> check) {
+    addCheckT<ArgRealArray, std::vector<double>>(argName, check);
+  }
+
+  /** These addArg member functions build and modify an ArgBoolArray objects **/
+  void addArg(const char* arg, const char* desc, std::vector<std::string_view>* const valPtr, bool req = false) {
+    addArgT<ArgTextArray, std::vector<std::string_view>>(arg, desc, valPtr, req);
+  }
+  void addCheck(std::function<void(std::vector<std::string_view>*)> check) {
+    addCheckT<ArgTextArray, std::vector<std::string_view>>(check);
+  }
+  void addCheck(const char* argName, std::function<void(std::vector<std::string_view>*)> check) {
+    addCheckT<ArgTextArray, std::vector<std::string_view>>(argName, check);
+  }
 
 #endif // REMOVE_VECTOR_ARGUMENT_CODE
 
- private:
+private:
 
-    /** split is a static utility member function that splits a string with a number of separators into separate strings.
-    *** string in is the input string
-    *** char sep is the separator character about which the string will be separated
-    *** returned is a vector of individual separated strings **/
+  /** split is a static utility member function that splits a string with a number of separators into separate strings.
+  *** string in is the input string
+  *** char sep is the separator character about which the string will be separated
+  *** returned is a vector of individual separated strings **/
 
-    static std::vector<std::string_view> split(std::string_view in, char sep) {
-      std::vector<std::string_view> out;
-      std::string_view word;
-      size_t start_idx = 0;
-      while (true) {
-        size_t end_idx = in.find(sep, start_idx);
-        word = in.substr(start_idx, end_idx - start_idx);
-        out.push_back(word);
-        if (end_idx == std::string::npos) break;
-        start_idx = end_idx + 1;
-      }
-      return out;
+  static std::vector<std::string_view> split(std::string_view in, char sep) {
+    std::vector<std::string_view> out;
+    std::string_view word;
+    size_t start_idx = 0;
+    while (true) {
+      size_t end_idx = in.find(sep, start_idx);
+      word = in.substr(start_idx, end_idx - start_idx);
+      out.push_back(word);
+      if (end_idx == std::string::npos) break;
+      start_idx = end_idx + 1;
     }
+    return out;
+  }
 
 
-    /** The following template addArg member function builds a specific ArgValue_t object, each for a different arg type
-    *** Specific versions of this function for each allowed type are built in the public section of this class
-    *** Parameters:
-    *** char* arg is the switch or argument name on the command line.
-    *** char* desc is the description that will be printed with the
-    *** ArgValue_t valPtr is a pointer to a user variable to be modified by the command line arg
-    *** bool req = false is a flag which indicates these argment or switch is required.
-    **/
-    template<class ArgBase_t, class ArgValue_t>
-    void addArgT(const char* arg, const char* desc, ArgValue_t* const valPtr, bool req) {
-      auto* tempArgBase = new ArgBase_t(arg, desc, valPtr, req);
-      std::pair< std::string, ArgBase* > argEntry{ arg, (ArgBase*)tempArgBase };
-      argsMap.insert(argEntry);
-      lastMapEntry = argEntry;
+  /** The following template addArg member function builds a specific ArgValue_t object, each for a different arg type
+  *** Specific versions of this function for each allowed type are built in the public section of this class
+  *** Parameters:
+  *** char* arg is the switch or argument name on the command line.
+  *** char* desc is the description that will be printed with the
+  *** ArgValue_t valPtr is a pointer to a user variable to be modified by the command line arg
+  *** bool req = false is a flag which indicates these argment or switch is required.
+  **/
+  template<class ArgBase_t, class ArgValue_t>
+  void addArgT(const char* arg, const char* desc, ArgValue_t* const valPtr, bool req) {
+    auto* tempArgBase = new ArgBase_t(arg, desc, valPtr, req);
+    std::pair< std::string, ArgBase* > argEntry{ arg, (ArgBase*)tempArgBase };
+    argsMap.insert(argEntry);
+    lastMapEntry = argEntry;
+  }
+
+  /** The following template addCheck member function adds a "check" lambda of function to the last
+  *** ArgBase_t object added to the argMap..
+  *** Specific versions of this function for each allowed type are built in the public section of this class
+  *** Parameters:
+  *** std::function<void(ArgValue_t*)> check is a reference to a lambda that does the check on the args value.
+  ***/
+  template<class ArgBase_t, class ArgValue_t>
+  void addCheckT(std::function<void(ArgValue_t*)> check) {
+    if (typeid(ArgBase_t) == typeid(*lastMapEntry.second)) {
+      static_cast<ArgBase_t*>(lastMapEntry.second)->check = check;
     }
+    else {
+      std::cout << "addCheck: check is the wrong type for " << lastMapEntry.first << std::endl;
+    }
+  }
 
-    /** The following template addCheck member function adds a "check" lambda of function to the last
-    *** ArgBase_t object added to the argMap..
-    *** Specific versions of this function for each allowed type are built in the public section of this class
-    *** Parameters:
-    *** std::function<void(ArgValue_t*)> check is a reference to a lambda that does the check on the args value.
-    ***/
-    template<class ArgBase_t, class ArgValue_t>
-    void addCheckT(std::function<void(ArgValue_t*)> check) {
-      if (typeid(ArgBase_t) == typeid(*lastMapEntry.second)) {
-        static_cast<ArgBase_t*>(lastMapEntry.second)->check = check;
+  /** The following template addCheck member function adds a "check" lambda of function to an ArgBase_t object
+  *** with the name argName.
+  *** Specific versions of this function for each allowed type are built in the public section of this class
+  *** Parameters:
+  *** char* arg is the switch or argument name on the command line.
+  *** std::function<void(ArgValue_t*)> check is a reference to a lambda that does the check on the args value.
+  ***/
+  template<class ArgBase_t, class ArgValue_t>
+  void addCheckT(const char* argName, std::function<void(ArgValue_t*)> check) {
+    auto match = argsMap.find(std::string(argName));
+    ArgBase* ptr = match->second;
+    if (match != argsMap.end()) {
+      // parse the value for this arg and the mark it found
+      if (typeid(ArgBase_t) == typeid(*ptr)) {
+        static_cast<ArgBase_t*>(match->second)->check = check;
       }
       else {
         std::cout << "addCheck: check is the wrong type for " << lastMapEntry.first << std::endl;
       }
     }
-
-    /** The following template addCheck member function adds a "check" lambda of function to an ArgBase_t object
-    *** with the name argName.
-    *** Specific versions of this function for each allowed type are built in the public section of this class
-    *** Parameters:
-    *** char* arg is the switch or argument name on the command line.
-    *** std::function<void(ArgValue_t*)> check is a reference to a lambda that does the check on the args value.
-    ***/
-    template<class ArgBase_t, class ArgValue_t>
-    void addCheckT(const char* argName, std::function<void(ArgValue_t*)> check) {
-      auto match = argsMap.find(std::string(argName));
-      ArgBase* ptr = match->second;
-      if (match != argsMap.end()) {
-        // parse the value for this arg and the mark it found
-        if (typeid(ArgBase_t) == typeid(*ptr)) {
-          static_cast<ArgBase_t*>(match->second)->check = check;
-        }
-        else {
-          std::cout << "addCheck: check is the wrong type for " << lastMapEntry.first << std::endl;
-        }
-      }
-      else {
-        // print error if arg name is not in the argMap.
-        std::cout << "addCheck does not recognise argument name " <<  argName << ".\n";
-      }
+    else {
+      // print error if arg name is not in the argMap.
+      std::cout << "addCheck does not recognise argument name " << argName << ".\n";
     }
+  }
 
-    // argsMap hold and provides the lookup of user defined arguments.
-    std::map<std::string, ArgBase*> argsMap;
-    // this holds the last mam entry for use by functions that add additional info the Arg* objects 
-    std::pair<std::string, ArgBase*> lastMapEntry;
-    std::string_view printHelpPretext = "";
+  // argsMap hold and provides the lookup of user defined arguments.
+  std::map<std::string, ArgBase*> argsMap;
+  // this holds the last mam entry for use by functions that add additional info the Arg* objects 
+  std::pair<std::string, ArgBase*> lastMapEntry;
+  std::string_view printHelpPretext = "";
 
 public:
 
   /** The parse member function parses the standard C command line arguments and modifies the variables
   *** int argc is the number of args
-  *** char* argv[] array of pointers to char strings holding the actual arguments 
-  *** return is a bool that is true if no errors found (program should continue) or 
+  *** char* argv[] array of pointers to char strings holding the actual arguments
+  *** return is a bool that is true if no errors found (program should continue) or
                                false if errors found or it the -h arg was present (program should be terminated) **/
   bool parse(const int argc, const char* argv[], int start = 1) {
     std::string_view argName;
@@ -597,12 +787,15 @@ public:
       catch (const std::exception& e) {
         // catch any errors found in parsing.
         std::cerr << "Command line argument error on " << s << ".\n";
-        std::cerr << e.what() << std::endl;
+        std::string newWhat = e.what();
+        if (newWhat.find("stoll") != std::string::npos || newWhat.find("stod") != std::string::npos)
+          newWhat = "expected a value or open parenthasis";
+        std::cerr << newWhat << std::endl;
         printHelp(false);
         return false;
       }
     }
-  // after parsing is done check to tee the the required argument were present.
+    // after parsing is done check to tee the the required argument were present.
     for (auto arg : argsMap) {
       if (arg.second->required && !arg.second->found) {
         std::cout << "Required command line argument " << arg.first << " was not present.\n";
@@ -616,7 +809,7 @@ public:
   void addHelpPretext(std::string_view pt) {
     printHelpPretext = pt;
   }
-  
+
   /** The printHelp member function prints the list of user defined arguments with type and descriptions.
   *** It is called by parse() when -h is found in the arguments or when a parse error is identified.
   *** bool printDefaults : if true prints the default value for each of the args.**/
@@ -638,16 +831,16 @@ public:
       std::cout << printHelpPretext << std::endl;
     // now print the table of defined args, header first
     std::cout << "Argument format: arg value or arg=value\n";
-  //std::cout << format("{:{}} : {:{}} {}\n", "arg", aNameWidth, "value type", aTypeWidth, "Description");
+    //std::cout << format("{:{}} : {:{}} {}\n", "arg", aNameWidth, "value type", aTypeWidth, "Description");
     std::cout << pw("arg", aNameWidth) << " : " << pw("value type", aTypeWidth) << " " << "Description" << std::endl;
     std::cout << "----------------------------------------------------------------------------------------\n";
-  //std::cout << format("{:{}} : {:{}} {}\n", "-h", aNameWidth, " ", aTypeWidth, "Prints this help message");
+    //std::cout << format("{:{}} : {:{}} {}\n", "-h", aNameWidth, " ", aTypeWidth, "Prints this help message");
     std::cout << pw("-h", aNameWidth) << " : " << pw(" ", aTypeWidth) << " " << "Prints this help message" << std::endl;
     // then each defined arg
     for (auto arg : argsMap) {
-    //std::cout << format("{:{}} : {:{}} {}\n", arg.second->argName, aNameWidth, arg.second->type(), aTypeWidth, arg.second->description);
+      //std::cout << format("{:{}} : {:{}} {}\n", arg.second->argName, aNameWidth, arg.second->type(), aTypeWidth, arg.second->description);
       std::cout << pw(arg.second->argName, aNameWidth) << " : " << pw(arg.second->type(), aTypeWidth) << " " << arg.second->description << std::endl;
-    //if (printDefaults) std::cout << format("{:{}}    default = {}\n", "", aNameWidth + aTypeWidth, arg.second->toString());
+      //if (printDefaults) std::cout << format("{:{}}    default = {}\n", "", aNameWidth + aTypeWidth, arg.second->toString());
       if (printDefaults) std::cout << pw("", aNameWidth + aTypeWidth) << "    default = " << arg.second->toString() << std::endl;
     }
   }
@@ -656,7 +849,7 @@ public:
   std::string getValuesString() {
     std::string out;
     for (auto arg : argsMap) {
-      out += std::string(arg.second->argName ) + "=" + arg.second->toString() + " ";
+      out += std::string(arg.second->argName) + "=" + arg.second->toString() + " ";
     }
     return out;
   }
