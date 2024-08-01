@@ -8,17 +8,18 @@
 #include <functional>
 #include <stdexcept>
 
-//#define USE_FMT
+/* Take out all uses of format to make it compatible with earlier c++ compilers.
 #ifdef USE_FMT
-#include <fmt.core>
-using fmt::format
+#include <fmt/core.h>
+using fmt::format;
 #else
 //#include <format>
 //using std::format;
 #endif
+*/
 
 /**************************************************************************************************/
-/* class ParseArgs is a command line arguments or switches.                                       */
+/* class ParseArgs is a command line argument or switch parser.                                   */
 /* Usage                                                                                          */
 /* 1) Define the variables that you want the switches to modify. They can be 1 of 4 base types:   */
 /*    bool for boolean switches, int64_t for integer switches,                                    */
@@ -30,7 +31,7 @@ using fmt::format
 /*       char* arg is the switch or argument name on the command line.                            */
 /*       char* desc is the description that will be printed with the                              */
 /*       <type> valPtr is a pointer to a user variable to be modified by the command line arg     */
-/*       bool req is an optional flag which if true indicates this argment or switch is required. */
+/*       bool req is an optional flag which indicates this argument or switch is required.        */
 /* 3a) Optionally add a lambda that performs some check on the value of the argument. The lambda  */
 /*     is of type void and should take as input, a pointer to the variable provided in step 3. If */
 /*     the check fails, the lambda should throw any std::exception with text explaining the error.*/
@@ -47,15 +48,15 @@ using fmt::format
 /*                                                                                                */
 /* Regardless of how the arguments types defined, the user can enter the arguments in 2 formats:  */
 /* 1. the command line switch and value separated by a space                                      */
-/* 2. the command line switch and value separated by and '='                                      */
-/* However a boolean switch without a value will set the boolean variable to true.                */
+/* 2. the command line switch and value separated by an '='                                       */
+/* However, a boolean switch without a value will set the boolean variable to true.               */
 /* Also there is one predefined switch -h which will print the list of user defined switches      */
 /* with the provided descriptions.                                                                */
-/* The integer and real values can be an equation which will be evaluated and the result will     */
-/* copied copied to the variable.  The equation is evaluated using standard order ans precedence  */
+/* The integer and real values can be an equation that will be evaluated, and the result will     */
+/* copied copied to the variable.  The equation is evaluated using standard order and precedence  */
 /* rules. Operators include + - * / % and ^.  Parentheses can be used to change calculation order.*/
-/* For the integer  type, the numbers can be entered as binary, octal or hex by prefixing the     */
-/* number with '0b', '0' or '0x' respectively. Otherwise the number is interpreted as decimal.    */
+/* For the integer  type, the numbers can be entered as binary, octal, or hex by prefixing the    */
+/* number with '0b', '0' or '0x' respectively. Otherwise, the number is interpreted as decimal.   */
 /*                                                                                                */
 /* Example:                                                                                       */
 /*        :                                                                                       */
