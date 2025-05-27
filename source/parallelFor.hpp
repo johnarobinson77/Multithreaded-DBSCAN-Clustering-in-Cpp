@@ -33,7 +33,7 @@ void parallelFor(const RandomIt begin, const RandomIt end, FN fn, int64_t num_se
   // Compute the number of iterations to preform on each segment using a double to preserve the fraction.
   // using the method of iterating through bounds applied to each thread using a double and then rounding to
   // the nearest integer ensures that the difference in the number of iterations that each thread will do is 
-  // no greater than ofne.
+  // no greater than one.
   double seg_size = (double)n / (double)num_segs;
   int64_t sBeg = 0;
   double sEnd = seg_size;

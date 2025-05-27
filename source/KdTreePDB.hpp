@@ -5,7 +5,7 @@
  */
 
  //
- //  KdTreePDB.h
+ //  KdTreePDB.hpp
  //
  //  Created by John Robinson on 11/18/23.
  // 
@@ -27,10 +27,10 @@
 #include <exception>
 #include <future>
 #include "parallelSort.hpp"
-#include "avlSet.h"
-#include "SimpleContainers.h"
+#include "avlSet.hpp"
+#include "SimpleContainers.hpp"
 
-std::atomic<size_t> nodesVisited = 0;
+//std::atomic<size_t> nodesVisited = 0;
 
 /*
  * This type is the signed equivalent of size_t and might be equivalent to intmax_t
@@ -47,7 +47,6 @@ enum SearchRet { // The following are codes that the search routines will return
 // this is an ID that is used to indicate all taken when the nodes below do not match all IDs.
 const uint32_t allTakenID = 0xFFFFFFFF;
 
-
 // the KdTreePDB class provide a user interface wrapper around the kdNodePDB objects that 
 // form the actual k-d tree.
 template<typename K, typename V, typename M, size_t N>
@@ -55,7 +54,6 @@ class KdTreePDB {
 
   // this is ther return type
   typedef std::pair<K*, std::list<V>*> retPair_t;
-
 
   class KdNodePDB {
 
@@ -67,11 +65,11 @@ class KdTreePDB {
     KdNodePDB* gtChild;
     std::list<V, STLAdaptor<V>>* values;  // list of values associated with the point in tuple
     std::mutex thisMutex;       // used to lock this node when it is being taken by a cluster or updating the allTakenSet
-    M* movedTo = nullptr;       // pointer to the container that is holding the values that were here.
+    std::atomic<M*> movedTo{ nullptr };  // pointer to the container that is holding the values that were in this node.
     SimpleSet allTakenSet;      // set of IDs of the clusters that have taken values from this node and all nodes below.
 
   public:
-    // need to make sure allocator pointers are provided when construction occures so delete the default
+    // need to make sure allocator pointers are provided when construction occurs so delete the default
     KdNodePDB() = delete;
 
     // constructor for entering the point only.
@@ -102,7 +100,7 @@ class KdTreePDB {
 
   public:
     ~KdNodePDB() {
-      std::cout << "Should not have been called.\n";
+      std::cout << "Destructor for KdNodePDB Should not have been called.\n";
     }
 
   public:
@@ -600,7 +598,6 @@ class KdTreePDB {
       return NoResult;
     }
 
-
     /*
      * The regionSearch function searches the k-d tree to find the KdNodes that
      * lie within a hyper-rectangle defined by the query lower and upper bounds.
@@ -650,7 +647,7 @@ class KdTreePDB {
         if (ltChild != nullptr) {
           ltRetCode = ltChild->checkAllTakenStatus(moveToID);
           if (ltRetCode != AllTakenByID)
-            ltFlag = true;// defer going doen the lt branch until after this nodes point have veen added to the result FIFO
+            ltFlag = true;// defer going down the lt branch until after this nodes point have been added to the result FIFO
         }
         else
           ltRetCode = AllTakenByID;
@@ -664,7 +661,7 @@ class KdTreePDB {
           if (gtChild != nullptr) {
             gtRetCode = gtChild->checkAllTakenStatus(moveToID);
             if (gtRetCode != AllTakenByID)
-              gtFlag = true; // defer going doen the gt branch until after this nodes point have veen added to the result FIFO
+              gtFlag = true; // defer going down the gt branch until after this nodes point have been added to the result FIFO
           }
           else
             gtRetCode = AllTakenByID;
@@ -682,24 +679,27 @@ class KdTreePDB {
             }
             
             if (inside) {
-              // check if we need to grab a lock on this node
-              LOCK_THIS_BLOCK;
-              // check if the node had not already been taken after we have the lock
-              if (movedTo == nullptr) {
-                // if it has not, add this nodes data to the return list and cluster
+              // if the node has not already been taken, then movedTo will be null
+              // The compare and exchange will succeed and this node will be taken by the current cluster.
+              bool notTaken = false;
+              if (movedTo.load(std::memory_order_acquire) == nullptr) {
+                M* tmp = nullptr;
+                LOCK_THIS_BLOCK;
+                notTaken = movedTo.compare_exchange_strong(tmp, moveTo);
+                UNLOCK_THIS_BLOCK;
+              }
+              if (notTaken) {
+                // add this nodes data to the return list and cluster
                 result.push_back(tuple);
                 moveTo->addToCluster(tuple, *values);
-                movedTo = moveTo;  // mark the value as taken by this cluster.
-              }
-              else {
+              } else {
                 // this node was taken by another cluster, so indicate this cluster overlaps 
                 // that cluster by adding it to the overlaps set.
                 if (moveTo->overlaps == nullptr) {
                   moveTo->overlaps = new avlSet<M*>;
                 }
-                auto rslt = moveTo->overlaps->insert(movedTo);
+                auto rslt = moveTo->overlaps->insert(movedTo.load());
               }
-              UNLOCK_THIS_BLOCK;
             }
           }
         }
@@ -717,7 +717,7 @@ class KdTreePDB {
           if (gtChild != nullptr) {
             gtRetCode = gtChild->checkAllTakenStatus(moveToID);
             if (gtRetCode != AllTakenByID)
-              gtFlag = true; // defer going doen the lt branch until later
+              gtFlag = true; // defer going down the lt branch until later
           }
           else
             gtRetCode = AllTakenByID;
@@ -892,7 +892,215 @@ class KdTreePDB {
       return NoResult;
     }
 
+    // reset removes the data that was stored in the node during a previous build of a cluster set.
+    public:
+      void reset() {
+        if (ltChild != nullptr) ltChild->reset();
+        if (gtChild != nullptr) gtChild->reset();
+        allTakenSet.clear();
+        movedTo = nullptr;
+      }
+
   }; // class KdNodePDB
+
+/// @brief NNEntry holds a pair of a reference to a kdNode and a distance from a query point
+///         compare operators are based on distance
+struct NNEntry
+{
+  K distance;
+  KdNodePDB* kdNodePtr;
+
+  bool operator<(const NNEntry &other)
+  {
+    return distance < other.distance;
+  }
+  bool operator>(const NNEntry &other)
+  {
+    return distance > other.distance;
+  }
+  bool operator!=(const NNEntry &other)
+  {
+    return distance != other.distance;
+  }
+  bool operator==(const NNEntry &other)
+  {
+    return distance == other.distance;
+  }
+}; // NNEntry
+
+/// @brief HeapSort provides heapsort functionality on an array
+///         The array pointer is provided by a call to init.
+/// @tparam ET is is the type of the contents of the array.  It must support a '>' operator.
+template <typename ET>
+class HeapSort
+{
+
+private:
+  /// @brief pointer to array being sorted.
+  ET *arr;
+  /// @brief size of the array.
+  size_t arrSize;
+  /// @brief number of elements in the array.
+  size_t n;
+
+  /// @brief Swap the contents of two variable
+  /// @param a value to be swapped with b;
+  /// @param b value to be swapped with a
+  /// @return
+  void static inline swap(ET &a, ET &b)
+  {
+    ET tmp = a;
+    a = b;
+    b = tmp;
+  }
+
+  /// @brief heapifyTD performs a top-down heap consistency operation
+  /// @param n number of elements in the array
+  /// @param i is the tarting index of the heapify operation
+  /// @return is void
+  void heapifyTD(const size_t n, int i)
+  {
+
+    while (true)
+    {
+      int largest = i;
+      int left = 2 * i + 1;
+      int right = 2 * i + 2;
+
+      if (left < n && arr[left] > arr[largest])
+        largest = left;
+
+      if (right < n && arr[right] > arr[largest])
+        largest = right;
+
+      if (largest != i)
+      {
+        swap(arr[i], arr[largest]);
+        i = largest;
+      }
+      else
+      {
+        break;
+      }
+    }
+  }
+
+  /// @brief heapifyTD performs a bottom-up heap consistency operation
+  /// @param n number of elements in the array
+  /// @param i is the tarting index of the heapify operation
+  /// @return is void
+  void heapifyBU(size_t n, int i)
+  {
+    while (true)
+    {
+      // Find parent
+      int parent = (i - 1) / 2;
+      if (parent >= 0)
+      {
+        // For Max-Heap
+        // If current node is greater than its parent
+        // Swap both of them and loop
+        // for the parent
+        if (arr[i] > arr[parent])
+        {
+          swap(arr[i], arr[parent]);
+          // iterate heapify the parent node
+          i = parent;
+        }
+        else
+        {
+          break;
+        }
+      }
+    }
+  }
+
+public:
+  HeapSort() = delete;
+
+  /// @brief Heapsort onstructor
+  /// @param arrayIn is a pointer to an array of type ET to be sorted
+  /// @param arrSizeIn is the size of the array
+  /// @param nIn is the number of elements currently in the array, 0 by default.
+  HeapSort(ET *arrayIn, size_t arrSizeIn, size_t nIn = 0)
+  {
+    arr = arrayIn;
+    arrSize = arrSizeIn;
+    n = nIn;
+  }
+
+  /// @brief reset zeros out the number of elements in the array.
+  inline void reset() { n = 0; }
+
+  /// @brief get the current number of elements in the heap
+  /// @return number of elements
+  inline size_t size() { return n; }
+
+  /// @brief buildHeap arranges the data in arr to be a heap.
+  /// @return is void
+  void buildHeap()
+  {
+    for (int i = n / 2 - 1; i >= 0; i--)
+      heapifyTD(n, i);
+  }
+
+  /// @brief heapSort rearranges data in the array from a heap to sorted order.
+  /// @return is void
+  void heapSort()
+  {
+
+    if (n == 0)
+      return;
+    for (size_t i = n - 1; i > 0; i--)
+    {
+      swap(arr[0], arr[i]);
+      heapifyTD(i, 0);
+    }
+  }
+
+  /// @brief replaceMaxAndSort replaces the max element in the heap and reheapifies.
+  /// @param newElement is the data that will replace the heap max value
+  /// @return is void
+  void replaceMaxAndSort(const ET &newElement)
+  {
+    arr[0] = newElement;
+    heapifyTD(n, 0);
+  }
+
+  /// @brief insertAndSort adds a new data to the heap and reheapifies
+  /// @param n is the size of the array
+  /// @param newElement
+  /// @return is void
+  bool insertAndSort(const ET &newElement)
+  {
+    if (n == arrSize) return false;
+    // Increase the size of Heap by 1
+    arr[n] = newElement;
+    n++;
+
+    // Heapify the new node following a
+    // Bottom-up approach
+    heapifyBU(n, n - 1);
+    return true;
+  }
+
+  /// @brief deleteMax removes the max element from the heap and reheapifies.
+  void deleteMax()
+  {
+    // Get the last element
+    ET lastElement = arr[n - 1];
+
+    // Replace root with last element
+    arr[0] = lastElement;
+
+    // Decrease size of heap by 1
+    n = n - 1;
+
+    // heapify the root node
+    heapifyTD(arr, n, 0);
+  }
+
+}; // HeapSort
 
 
 private:
@@ -1046,6 +1254,143 @@ public:
     if (result.size() == 0) return false;
 
     return true;
+  }
+
+  /// @brief nearestNeighborSearch finds a list of num points in the CPU copy of the kdTree closest to query
+  /// @param query vector containing the center point of the nearest neighbor search
+  /// @param numNN the number of nearest neighbor node references to return
+  /// @return a list containing references to the <num> nearest neighbors.
+  std::list<KdNodePDB*> nearestNeighborSearch(const std::vector<K>& query, const size_t numNN) 
+  {
+    const size_t stackDepth = 40;
+
+    const K numericMax = std::numeric_limits<K>::max();
+    const double numericMaxSquared = static_cast<double>(numericMax) * static_cast<double>(numericMax); 
+
+    struct traverseState {
+      int8_t branchCode;
+      int8_t depth;
+    };
+    traverseState current = { 0, 0 };
+    KdNodePDB* childStack[stackDepth];
+    traverseState depthStack[stackDepth];
+    int32_t stackNext = 0;
+
+    // create the heapSort object and initialize to one entry with max distance
+    NNEntry* nnEntryPtr = (NNEntry*)malloc(numNN * sizeof(NNEntry));
+    nnEntryPtr[0].distance = std::numeric_limits<K>::max();
+    nnEntryPtr[0].kdNodeIdx = nullptr;
+    HeapSort<NNEntry> heapSort(nnEntryPtr, numNN, 1);
+    KdNodePDB* thisNodePtr = root;
+    vector<double> dQuery(N);
+    for(size_t i = 0;  i < N; i++) dQuery[i] = static_cast<double>(query[i]);
+    double distToNode;
+
+    while (current.depth >= 0)
+    {
+      // The partition cycles as x, y, z, w...
+      int32_t axis = current.depth % N;
+      const K& thisNode = *thisNodePtr;
+
+      // if not the first time at this node, calculate the distance to the current node.
+      if (current.branchCode == 0) {
+        double distSquared = 0.0;
+        for (int32_t i = 0; i < N; i++)
+        {
+          double diff = dQuery[i] - static_cast<double>(thisNode.tuple[i]); 
+          distSquared += diff * diff;
+        }
+        NNEntry tmp;
+        if (distSquared < numericMaxSquared) // prevent overflow of KdCoord calculation
+          tmp.distance = static_cast<K>(sqrt(distSquared));
+        else
+          tmp.distance = numericMax;
+        tmp.kdNodeIdx = thisNode.tuple;
+    
+        // add to the heapSort array
+        if (heapSort.size() >= numNN) {
+          if (tmp < nnEntryPtr[0])
+            heapSort.replaceMaxAndSort(tmp);
+        } else {
+          heapSort.insertAndSort(tmp);   
+        }
+      }
+
+      int32_t branchCode = 0;  // this code is used to determine which branches to descend.
+      K cut = nnEntryPtr[0].distance;
+
+      // check the  the geometry for branching left first.  Then if not null set the branch code.
+      distToNode = dQuery[axis] - static_cast<double>(thisNode.tuple[axis]);
+      if (!(current.branchCode & 1) && distToNode < cut) {
+        if (thisNode.ltChild != nullptr) branchCode = 1; 
+      }
+
+      if (!(current.branchCode & 2) && -distToNode < cut) {
+        if (thisNode.gtChild != nullptr) branchCode += 2;
+      }
+
+      // next traverse to the next node according to the branch code
+      switch (branchCode) {
+      case 0: 
+        // pop the stack if not empty
+        if (stackNext > 0) {
+          stackNext--;
+          thisNodePtr = childStack[stackNext];
+          current = depthStack[stackNext];
+        } else {
+          // or exit
+          current.depth = -1;
+        }
+        break;
+      case 1:
+        thisNodePtr = thisNode.ltChild;
+        current.depth++;
+        current.branchCode = 0;
+        break;
+      case 2:
+        thisNodePtr = thisNode.gtChild;
+        current.depth++;
+        current.branchCode = 0;
+        break;
+      case 3:
+        // push current node on the stack
+        childStack[stackNext] = thisNodePtr;
+        depthStack[stackNext].depth = current.depth;
+        if (distToNode < 0.0) {
+          depthStack[stackNext].branchCode = 1;
+          //and pursue the ltChild
+          thisNodePtr = thisNode.ltChild;
+        } else {
+          depthStack[stackNext].branchCode = 2;
+          //and pursue the gtChild
+          thisNodePtr = thisNode.gtChild;
+        }
+        stackNext++;
+        current.depth++;
+        current.branchCode = 0;
+        break;
+      }
+    }
+    heapSort.heapSort();
+    // allocate the result list and fill with  kdNodeIdx 
+    std::list<KdNodePDB*> result;
+    for (size_t i = 0;  i < heapSort.size(); i++)
+      result.push_back(nnEntryPtr[i].kdNodeIdx);
+    return result;
+  }
+
+
+
+  bool isBuilt() {
+    return root != nullptr;
+  }
+
+  // the reset method removes the information that is stored in the kdTree during building a
+  // set of clusters.  This allows building another cluster set without having to rebuild the kdTree.
+  // THis would save time in the case where a cluster is built with a different window on the same data set.
+public:
+  void reset() {
+    root->reset();
   }
 
   ~KdTreePDB() {

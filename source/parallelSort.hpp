@@ -251,7 +251,7 @@ void parallelSort(RandomIt begin, RandomIt end, CF compFunc, size_t threads = 0)
   // is only one bigger than the min.
   double delta = double(len) / double(threads);
 
-  //sort threads segments of the input arry using the sort method provided in the function pointer
+  //sort threads segments of the input array using the sort method provided in the function pointer
   parallelFor((int64_t)0, (int64_t)threads, [begin, delta, compFunc](int64_t i) {
     int64_t lb = llround(i * delta);
     int64_t le = llround((i + 1) * delta);

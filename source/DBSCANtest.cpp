@@ -14,8 +14,8 @@
 #include <thread>
 #include <iomanip>
 #include "MTDBSCAN.hpp"
-#include "avlSet.h"
-#include "ParseArgs.h"
+#include "avlSet.hpp"
+#include "ParseArgs.hpp"
 #include <stdlib.h>
 #ifdef COMPARISON_TEST
 #include "dbscan.h"
@@ -68,11 +68,15 @@ int main(int argc, const char* argv[])
   dkey_t searchRad = (dkey_t)(clusterSpan * sqrt(numDimensions) / sqrt(3));  // size of the cluster search window.
   
   ParseArgs parseArgs;
-  parseArgs.addArg("-c", "Set number of clusters", &numClusters);
+  parseArgs.addArg("-c", "Set number of artificial clusters", &numClusters);
   parseArgs.addArg("-p", "Set Number of points per cluster", &numPointsPer);
   parseArgs.addArg("-s", "Set span of the points in a cluster", &clusterSpan);
   parseArgs.addArg("-r", "Set size of cluster search window", &searchRad);
   parseArgs.addArg("-t", "Set number of threads", &numThreads);
+  parseArgs.addCheck([](int64_t* const value) {
+    if (*value < 0 || *value == 0)
+      throw std::range_error("Number of threads must be > 0 or -1 which indicates use hardware thread count");
+  });
   parseArgs.addArg("-g", "Set random number generator seed", &rngSeed);
   parseArgs.addHelpPretext("DBSCANtest <args> is a test of the multithreaded DBSCAN code in MTDBSCAN.hpp");
   if (!parseArgs.parse(argc, argv)) exit(1);
@@ -117,7 +121,9 @@ int main(int argc, const char* argv[])
     mtdbscan->addPointWithValue(coordinates[i], static_cast<dval_t>(i));
   }
   // get the search range to about cluster distance window
-  std::vector<dkey_t> window(numDimensions);
+  // dynamic allocator of window is done to make valgrind happy
+  auto windowPtr = new std::vector<dkey_t>(numDimensions);
+  std::vector<dkey_t>& window = *windowPtr;
   for (int i = 0; i < numDimensions; i++) {
     window[i] = searchRad;
   }
@@ -147,38 +153,47 @@ int main(int argc, const char* argv[])
   if (!mtdbscan->checkClusters(numPoints)) {
     delete[] coordinates;
     delete[] clusterCenters;
-    window.clear();
+    delete windowPtr;
     exit(1);
   }
   if (false) {
     delete[] coordinates;
     delete[] clusterCenters;
-    window.clear();
+    delete windowPtr;
     exit(1);
   }
   
   std::cout << "Checking to see that all values ended up in some cluster" << std::endl;
   
-  avlSet<dval_t> valMatch;
+  // allocate a vector of bools, one for each point submitted to dbscan, to check that all points are represented in the clusters
+  // dynamic allocation of boolSet done to make valgrind happy 
+  auto boolSetPtr = new std::vector<bool>(numPoints);
+  std::vector<bool>& boolSet = *boolSetPtr;
+  // Using std::fill to set all values to false
+  std::fill(boolSet.begin(), boolSet.end(), false);
+
+  // set boolSet[val] true for each val or item in the clusters.  Make sure it is only set once.
   bool passed = true;
   for (size_t i = 0; i < mtdbscan->getNumClusters(); i++) {
     for (dval_t val : *mtdbscan->getClusterValueList(i)) {
-      passed &= valMatch.insert(val);
+      passed &= boolSet[val] == false;
+      boolSet[val] = true;
       passed &= val < static_cast<dval_t>(numPoints) && val >= static_cast<dval_t>(0);
     }
   }
-  if (passed && valMatch.size() == numPoints) {
+  // make sure every bool in boolSet is set, indicating all items are represented.
+  if (passed && std::count(boolSet.begin(), boolSet.end(), true) == numPoints) {
     std::cout << "Passed" << std::endl;
   }
   else {
     std::cout << "ERROR: Failed to find the same set values in the clusters as generated." << std::endl;
     delete[] coordinates;
     delete[] clusterCenters;
-    window.clear();
+    delete windowPtr;
     exit(1);
   }
-  valMatch.clear();
-  
+  delete boolSetPtr;
+
 #ifdef COMPARISON_TEST
 
   // the comparison test runs the same data through the single threaded dbscan code and 
@@ -300,27 +315,38 @@ int main(int argc, const char* argv[])
     std::cout << "Starting sorting test of a small 5 cluster case." << std::endl;
     auto dbscan1 = new MTDBSCAN<dkey_t, dval_t, 1>();
 
-    const std::vector<dkey_t> smallc{ 1, 101, 201, 301, 401, 2, 102, 202, 302, 3, 103, 203, 4, 104, 5 };
+    const std::vector<dkey_t> smallClusters{ 501, 101, 201, 301, 401, 502, 102, 202, 302, 503, 103, 203, 504, 104, 505 };
     std::vector<dkey_t> tc(1);
-    for (size_t i = 0; i < smallc.size(); i++) {
-      tc[0] = smallc[i];
+    for (size_t i = 0; i < smallClusters.size(); i++) {
+      tc[0] = smallClusters[i];
       dbscan1->addPointWithValue(tc, i);
     }
     std::vector<dkey_t> window1{ 2 };
     dbscan1->setWindow(window1);
-    dbscan1->build();
+    dbscan1->buildKdTree();
+    dbscan1->buildClusters();
     dbscan1->sortClustersBySize();
     std::cout << "Sorted cluster sized are:";
     for (size_t i = 0; i < dbscan1->getNumClusters(); i++) {
       std::cout << " " << dbscan1->getClusterSize(i);
     }
     std::cout << std::endl;
+    // clear and rebuild the cluster
+    dbscan1->clear();
+    dbscan1->buildClusters();
+    dbscan1->sortClustersBySize();
+    auto center = dbscan1->getClusterCenter(0);
+    std::cout << "Center of the largest cluster is " << center->at(0) << std::endl;
+    auto maxBounds = dbscan1->getClusterMaxCorner(0);
+    std::cout << "Max corner of the largest cluster is " << maxBounds->at(0) << std::endl;
+    auto minBounds = dbscan1->getClusterMinCorner(0);
+    std::cout << "Min corner of the largest cluster is " << minBounds->at(0) << std::endl;
     delete dbscan1;
   }
 
   delete[] coordinates;
   delete[] clusterCenters;
-  window.clear();
+  delete windowPtr;
 
   exit(0);
 
