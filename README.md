@@ -107,53 +107,113 @@ The following files are provided to test the multithreaded DBSCAN code and are n
   //        V is the type or class of the value
   //        N is the number of components of the point
 
-  // constructor with window
-  MTDBSCAN< K, V, N >(std::vector<K>& window)
+  /// @brief default constructor
+  MTDBSCAN() noexcept 
 
-  // addPointWithValuefuction adds a point or key and an associated value to the dbscan object
-  size_t addPointWithValue(std::vector<K> point, V value)
+  /// @brief constructor with window
+  MTDBSCAN(std::vector<K> &window) noexcept 
 
-  // setWindow sets the clustering window radius oe=r 1/2 the search kernal size.  It must have the same number of values as N.  
-  void setWindow(std::vector<K>& window)
+  /// @brief destructor.  Deletes the entire list of clusters.
+  ~MTDBSCAN() noexcept 
+ 
+  /// @brief setNumThreads sets the number of threads sed to build the kdTree and then build the cluster list.
+  /// @param thd number of threads.  The default is to use the hardware concurrency.
+  void setNumThreads(int64_t thd = -1)  noexcept 
+ 
+  /// @brief addPointWithValue adds a point to be clustered and the value associated with that point
+  /// @param point vector of a point.  should have the same dimensions as specified in MTDBSCAN
+  /// @param value value associated with the point
+  /// @return returns the number of points added so far.
+  size_t addPointWithValue(std::vector<K> &point, V value) noexcept 
+ 
+  /// @brief setWindow sets the search window used to build a cluster
+  /// @param window is a vector distances from the center of some search point to include new points
+  ///               It must have the same dimensions as as the N in MTDBSCAN
+  void setWindow(std::vector<K> &window)
 
-  // build builds the clusters.  All points and values must be added first.
-  // It will return false if called a second time after dbscan was constructed.
+  /// @brief buildKdTree builds a kdTree using the points added by addPointWithValue.
+  /// @return true is no errors
+  bool buildKdTree() 
+
+  /// @brief deleteKdTree deletes the kdtree used to build a set of clusters.
+  /// After the clusters are built it has no function.
+  void deleteKdTree()
+
+  /// @brief builds a set of clusters using an exiting kdTree and the current window settings.
+  /// @return true if no errors.
+  bool buildClusters()
+
+  /// @brief build() builds the clusters.  All points and values must be added first.
+  /// @return t will return false if called a second time after MTDBSCAN was constructed.
   bool build()
 
-  //sortClusterBySize sorts the cluster by the number of values in the cluster from largest to smallest.  To implement
-  // noise cutoff, call this function, and don't use the values at the end of the vector beyond the cutoff.
-  void sortClustersBySize()
+  /// @brief sortClusterBySize sorts the clusters by the number of values in the cluster
+  /// @param smallestFirst true is smallest to largest, false is largest to smallest (default).
+  void sortClustersBySize(bool smallestFirst = false) noexcept
 
-  // cluster setters and getters
-  // getClusterSize returns the number of values in cluster clusterIdx
-  size_t getClusterSize(size_t clusterIdx)
+  /// @brief sortClusterByFirstValue sorts the cluster by the first value in the cluster.  Used in test for comparing 2 Cluster sets
+  void sortClustersByFirstValue() noexcept 
 
-  // getClusterValueList returns a pointer to the list of values in cluster clusterIdx
-  std::list<V>* getClusterValueList(size_t clusterIdx) 
+  /// @brief getClusterSize returns the size of the cluster by index
+  /// @param clusterIdx index of the cluster 
+  /// @return size of the cluster 0r 0 if the cluster index is out of range.
+  size_t getClusterSize(size_t clusterIdx) const noexcept
 
-  // getClusterMaxCorner returns a vector of the maximum corner of the
-  // bounding hypercube of cluster clusterIdx
-  std::vector<K>* getClusterMaxCorner(size_t clusterIdx)
+  /// @brief getClusterValueList returns a pointer to the list of values in the cluster at clusterIdx
+  /// @param clusterIdx index of the cluster
+  /// @return pointer to a list of values in that cluster or nullptr if clusterIdx is out of range.
+  std::list<V> *getClusterValueList(size_t clusterIdx) const noexcept
 
-  // getClusterMinCorner returns a vector of the minimum corner of the
-  // bounding hypercube of cluster clusterIdx
-  std::vector<K>* getClusterMinCorner(size_t clusterIdx) 
+  /// @brief getClusterMaxCorner returns a pointer to a vector of the maximum corner of the
+  /// bounding hypercube of cluster clusterIdx
+  /// @param clusterIdx index of the cluster
+  /// @return pointer to the max bounds vector or nullptr if clusterIdx is out of range.
+  std::vector<K> *getClusterMaxCorner(size_t clusterIdx) const noexcept
+  
+  /// @brief getClusterMinCorner returns a pointer to a vector of the minimum corner of the
+  /// bounding hypercube of cluster clusterIdx
+  /// @param clusterIdx index of the cluster
+  /// @return pointer to the min bounds vector or nullptr if clusterIdx is out of range.
+  std::vector<K> *getClusterMinCorner(size_t clusterIdx) const noexcept
+  
+  /// @brief getClusterCenter returns a vector of the point that is the average of the 
+  /// points associated with the cluster at clusterIdx
+  /// @param clusterIdx index of the cluster
+  /// @return pointer to the center (average) vector, or nullptr if clusterIdx is out of range.
+  std::vector<K> *getClusterCenter(size_t clusterIdx) noexcept
+  
+  /// @brief getClusterID returns the ID assigned when cluster was created.  
+  /// IDs are unique and greater than 0 but not sequential
+  /// @param clusterIdx index of the cluster
+  /// @return cluster ID or 0 if clusterIdx is outside the range
+  uint32_t getClusterID(size_t clusterIdx) const noexcept
+  
+  /// @brief setClusterTag sets a tag in the cluster at clusterIdx in the form of an std::string
+  /// @param clusterIdx index of the cluster
+  /// @param tagIn string to copy to the cluster tag
+  /// @return true if successful, false if clusterIdx is outside the range.
+  bool setClusterTag(size_t clusterIdx, std::string &tagIn) noexcept
+  
+  /// @brief getClusterTag returns the tag string set by setClusterTag in the cluster at clusterIdx
+  /// @param clusterIdx index of the cluster
+  /// @return pointer to the tag string or nullptr if clusterIdx is outside the range.
+  std::string *getClusterTag(size_t clusterIdx) const noexcept
+  
+  /// @brief getNumClusters returns the number of clusters
+  /// @return the number of clusters
+  inline size_t getNumClusters() const noexcept
 
-  // getClusterTag returns the tag string set by setClusterTag
-  std::string* getClusterTag(size_t clusterIdx)
+  /// @brief clear resets the state of the MTDBSCAN clusters to be empty.  It allows setting a new window
+  /// and calling buildCluster using the data retained in the kdTree to get a new cluster.
+  void clear()
 
-  // cluster tag setter
-  bool setClusterTag(size_t clusterIdx, std::string& tagIn)
+  /// @brief checkCluster does some basic checks on the clusters and prints some statistics
+  /// @param numValues total number of values the clusters should contain
+  /// @param tag if a tag is provided, statistics are only checked for clusters with that tag.
+  /// @return true if no errors are found.
+  bool checkClusters(const size_t numValues, const std::string *tag = nullptr) const noexcept
 
-  // getNumClusters returns the number of clusters
-  size_t getNumClusters()
-
-  // checCluster does some basic checks on the clusters and prints some statistics
-  bool checkClusters(const size_t numLocations, const std::string* tag = nullptr)  
-
- // Sets the number of threads used for building the clusters.  The default is to use the hardware concurrency value for the current processor.
-  void setNumThreads(int64_t thd = -1)
-```
+  ```
 
 ## The Multithreaded DBSCAN Algorithm
 ### A Brief Explanation of DBSCAN
