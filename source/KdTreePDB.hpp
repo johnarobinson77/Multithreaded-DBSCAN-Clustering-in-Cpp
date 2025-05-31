@@ -681,14 +681,8 @@ class KdTreePDB {
             if (inside) {
               // if the node has not already been taken, then movedTo will be null
               // The compare and exchange will succeed and this node will be taken by the current cluster.
-              bool notTaken = false;
-              if (movedTo.load(std::memory_order_acquire) == nullptr) {
-                M* tmp = nullptr;
-                LOCK_THIS_BLOCK;
-                notTaken = movedTo.compare_exchange_strong(tmp, moveTo);
-                UNLOCK_THIS_BLOCK;
-              }
-              if (notTaken) {
+              M* tmp = nullptr;
+              if (movedTo.compare_exchange_strong(tmp, moveTo)) {
                 // add this nodes data to the return list and cluster
                 result.push_back(tuple);
                 moveTo->addToCluster(tuple, *values);
@@ -857,19 +851,12 @@ class KdTreePDB {
 
       // if no result was found on either of the children, see if this value is available.
       if (result.size() == 0LLU) {  // have not found a value yet
-        if (movedTo == nullptr) {  // see if we should grab a lock
-          // grab a lock
-          LOCK_THIS_BLOCK;
-          // check again to make sure this node was not taken
-          if (movedTo == nullptr) {
-            // capture the data from this node.
-            result.push_back(tuple);
-            moveTo->addToCluster(tuple, *values);
-            // mark the node as taken by the searching container.
-            movedTo = moveTo;  
-            inside = true;
-          }
-          UNLOCK_THIS_BLOCK;
+        //Mark this node taken by setting this node to the current cluster pointer atomically.
+        M* tmp = nullptr;
+        if (movedTo.compare_exchange_strong(tmp, moveTo)) {
+          // capture the data from this node.
+          result.push_back(tuple);
+          moveTo->addToCluster(tuple, *values);
         }
       }
 
